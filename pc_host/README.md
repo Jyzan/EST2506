@@ -32,28 +32,21 @@
 
 ### 🧵 多线程架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      Main Thread (GUI)                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │
-│  │ 控制面板  │  │ 孪生面板  │  │ 日志窗口  │  │ 数据看板  │ 
-│  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │
-│        │              ▲              │                  │
-│        │   pyqtSignal│              │                   │
-│        ▼              │              ▼                  │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │            SerialWorker (QThread)                │   │
-│  │  · timeout=0.1 非阻塞读 · ring buffer 拼行        │   │
-│  │  · tx_queue 写缓冲 · 115200 8N1                   │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                         │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │          NetworkWorker (QThread)                 │   │
-│  │  · NTP 对时 / 天气获取 · 异步不卡 UI              │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                         │
-│  QTimer: heartbeat(1s) · weather(30min) · daynight(1min)│
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph MAIN["<b>Main Thread (GUI)</b>"]
+        CP["控制面板"] --- TP["孪生面板"] --- LOG["日志窗口"] --- DATA["数据看板"]
+    end
+
+    subgraph WORKERS["<b>后台工作线程</b>"]
+        SW["<b>SerialWorker (QThread)</b><br/>· timeout=0.1 非阻塞读<br/>· ring buffer 拼行<br/>· tx_queue 写缓冲<br/>· 115200 8N1"]
+        NW["<b>NetworkWorker (QThread)</b><br/>· NTP 对时 / 天气获取<br/>· 异步不卡 UI"]
+    end
+
+    TIMERS["<b>QTimer</b><br/>· heartbeat (1s)<br/>· weather (30min)<br/>· daynight (1min)"]
+
+    MAIN <-->|"pyqtSignal<br/>跨线程通信"| WORKERS
+    MAIN --- TIMERS
 ```
 
 | 线程 | 职责 | 关键参数 |
@@ -157,16 +150,26 @@ python main.py
 
 #### 心跳与离线检测
 
-```
-┌──────────────┐      1 Hz       ┌──────────────┐
-│   PC 上位机  │  ─── *PING ──▶ │   S800 板卡   │
-│              │ ◀── *PONG ───  │              │
-│ last_pong_ts │                 │  uptime_s    │
-└──────────────┘                 └──────────────┘
+```mermaid
+sequenceDiagram
+    participant PC as PC 上位机
+    participant S800 as S800 板卡
 
-· *PONG 到达 → online=True, latency = (now - last_ping_time) * 1000 ms
-· 3 秒无 *PONG → online=False, 指示灯变灰, 状态栏显示"离线"
+    loop 每秒 1 次
+        PC->>S800: *PING
+        S800-->>PC: *PONG uptime_s
+        Note over PC: latency = (now - ping_ts) × 1000 ms<br/>online = True
+    end
+
+    Note over PC: 超过 3 秒未收到 *PONG
+    Note over PC: online = False<br/>指示灯变灰<br/>状态栏显示离线
 ```
+
+| 事件 | 行为 |
+|------|------|
+| `*PONG` 到达 | `online=True`, `latency = (now - last_ping_time) × 1000 ms` |
+| 3 秒无 `*PONG` | `online=False`, 指示灯变灰, 状态栏显示"离线" |
+
 
 #### 技术细节
 
@@ -308,35 +311,37 @@ def update_leds(self, value: int):
 
 #### 3.3 虚拟按键 — 双向联动逻辑
 
-```
-┌───────────────── 上行：板→PC ───────────────────┐
-│  MCU 物理按键 → *EVT:KEY <NAME>                 │
-│  → MainWindow.handle_protocol_line()           │
-│  → twin.pulse_key(name)                        │
-│  → btn.setProperty("pulse", True)              │
-│  → QSS [pulse="true"] { background: #2563eb }  │
-│  → QTimer.singleShot(200ms) → 恢复默认样式      │
-└────────────────────────────────────────────────┘
+**上行 — 板→PC（*EVT:KEY → 按钮高亮）：**
 
-┌───────────────── 下行：PC→板 ─────────────────┐
-│  用户点击虚拟按键                              │
-│  → pressed → QTimer 850ms → 长按触发          │
-│  → released 且未超 850ms → 短按触发           │
-│  → MainWindow.on_virtual_key(name)           │
-│  → send_command(f"*SET:KEY {name}")          │
-│  → MCU 等效物理按键效果                       │
-│                                              │
-│  长按特化：                                   │
-│  · FUNC 长按 → *SET:KEY SAVE（保存编辑）      │
-│  · ADD 长按 → 200/400ms 发送 3 次（模拟连加）  │
-│  · USER1 长按 → *SET:KEY USER1               │
-└──────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    A["MCU 物理按键"] --> B["*EVT:KEY &lt;NAME&gt;"]
+    B --> C["MainWindow<br/>handle_protocol_line()"]
+    C --> D["twin.pulse_key(name)"]
+    D --> E["btn.setProperty('pulse', True)<br/>QSS background: #2563eb"]
+    E --> F["QTimer.singleShot(200ms)<br/>→ 恢复默认样式"]
+```
+
+**下行 — PC→板（虚拟按键点击 → *SET:KEY）：**
+
+```mermaid
+flowchart LR
+    A["用户点击虚拟按键"] --> B{"pressed + QTimer"}
+    B -->|"短按 < 800ms"| C["on_virtual_key(name)"]
+    B -->|"长按 >= 800ms"| D["on_virtual_long_key(name)"]
+    C --> E["send_command('*SET:KEY ' + name)"]
+    D --> E
+    E --> F["MCU 等效物理按键效果"]
+
+    G["长按特化"] -.- H["FUNC → *SET:KEY SAVE"]
+    G -.- I["ADD → 200/400ms 连发 3 次"]
+    G -.- J["USER1 → *SET:KEY USER1"]
 ```
 
 | 机制 | 实现 |
 |------|------|
-| **短按** | `released` 信号 + 850ms 内未触发长按 |
-| **长按** | `pressed` 后 `QTimer.singleShot(850ms)` → `key_long` 信号 |
+| **短按** | `released` 信号 + 800ms 内未触发长按 |
+| **长按** | `pressed` 后 `QTimer.singleShot(800ms)` → `key_long` 信号 |
 | **高亮反馈** | `pulse_key()` → QSS `background: #2563eb` 持续 200ms |
 | **防环回** | 虚拟按键下行 `*SET:KEY` 后 MCU 不回报 `*EVT:KEY` |
 | **FORMAT 特殊处理** | 虚拟按键 FORMAT 后主动补 `*GET:FORMAT` 更新状态栏 |
@@ -392,7 +397,7 @@ def update_leds(self, value: int):
 |:--:|------|:--:|------|------|
 | **TX** | 🔵 蓝 | `#0064C8` | PC 发送的指令 | `-> *SET:TIME HOUR MIN SEC 12 30 45` |
 | **RX** | 🟢 绿 | `#009600` | MCU 返回的 OK 应答 | `<- OK 12.30.45` |
-| **EVT** | 🟣 紫 | `#8A2BE2` | MCU 主动上报的事件 | `<- *EVT:KEY USER2` |
+| **EVT** | 🟣 紫 | `#9600C8` | MCU 主动上报的事件 | `<- *EVT:KEY USER2` |
 | **ERR** | 🔴 红 | `#C80000` | 错误 / 异常 | `<- ERROR PARAM` / `serial error: ...` |
 | **SYS** | ⚪ 灰 | `#888888` | PC 本地系统信息 | `NTP sync aliyun delta 12 ms` |
 
@@ -429,24 +434,24 @@ def is_heartbeat(line: str) -> bool:
 | **实现文件** | `ntp_helper.py` / `main.py` — `ntp_sync()` |
 | **分值** | +2 |
 
-```
-用户点击 [NTP 对时]  或  MCU 按下 USER1
-        │
-        ▼
-NetworkWorker("ntp").start()
-        │
-        ├─ ntp.aliyun.com     (超时 3s)
-        ├─ cn.ntp.org.cn      (备用)
-        └─ ntp.ntsc.ac.cn     (备用)
-        │
-        ▼  成功 → on_network_done("ntp", (now, delta_ms, server))
-        │         ├─ *SET:DATE YEAR MONTH DATE yyyy mm dd
-        │         ├─ *SET:TIME HOUR MIN SEC hh mm ss
-        │         ├─ *NTP SYNC
-        │         └─ 日志: "NTP sync aliyun delta 12 ms"
-        │
-        ▼  失败 → on_network_failed("ntp", msg)
-                  └─ 弹窗 + 红色日志
+```mermaid
+flowchart TD
+    A["用户点击 NTP 对时<br/>或 MCU 按下 USER1"] --> B["NetworkWorker('ntp').start()"]
+    B --> C{依次尝试}
+    C -->|"1"| C1["ntp.aliyun.com"]
+    C -->|"2"| C2["cn.ntp.org.cn"]
+    C -->|"3"| C3["ntp.ntsc.ac.cn"]
+    C1 -->|超时 3s| C2
+    C2 -->|超时 3s| C3
+    C1 -->|成功| D["on_network_done()"]
+    C2 -->|成功| D
+    C3 -->|成功| D
+    C3 -->|全部失败| F["on_network_failed()"]
+    D --> D1["*SET:DATE YEAR MONTH DATE yyyy mm dd"]
+    D --> D2["*SET:TIME HOUR MIN SEC hh mm ss"]
+    D --> D3["*NTP SYNC"]
+    D --> D4["日志: NTP sync aliyun delta 12 ms"]
+    F --> F1["弹窗 + 红色日志"]
 ```
 
 | 关键设计 | 说明 |
@@ -465,19 +470,16 @@ NetworkWorker("ntp").start()
 | **实现文件** | `weather_helper.py` / `main.py` — `fetch_weather()` |
 | **分值** | +3 |
 
-```
-数据源: https://wttr.in/Shanghai?format=j1 (免费免 Key)
-        │
-        ▼  JSON 解析
-temp = int(r['current_condition'][0]['temp_C'])     → 温度
-desc = r['current_condition'][0]['weatherDesc']      → 天气描述
-cond = map_cond(desc)                                 → SUN/CLD/OVC/RAI/SNO/FOG
-        │
-        ▼  下发
-*SET:WEA <temp> <cond>     例: *SET:WEA 25 SUN
-        │
-        ▼  UI 更新
-天气卡片: ☀ 图标 + 25°C 大字 + 天气描述 + 更新时间
+```mermaid
+flowchart TD
+    A["数据源<br/>wttr.in/Shanghai?format=j1<br/>"] --> B["JSON 解析"]
+    B --> C1["temp = current_condition[0].temp_C<br/>→ 温度"]
+    B --> C2["desc = weatherDesc[0].value<br/>→ 天气描述"]
+    B --> C3["cond = map_cond(desc)<br/>→ SUN/CLD/OVC/RAI/SNO/FOG"]
+    C1 --> D["下发 *SET:WEA &lt;temp&gt; &lt;cond&gt;<br/>例: *SET:WEA 25 SUN"]
+    C2 --> D
+    C3 --> D
+    D --> E["UI 更新天气卡片<br/>图标 + 温度大字 + 描述 + 时间"]
 ```
 
 #### 天气映射表
@@ -516,20 +518,17 @@ cond = map_cond(desc)                                 → SUN/CLD/OVC/RAI/SNO/FO
 | **实现文件** | `astral_helper.py` / `main.py` — `auto_daynight()` |
 | **分值** | +1 |
 
-```
-上海经纬度: (31.2304°N, 121.4737°E), 时区 Asia/Shanghai
-        │
-        ▼  Astral sun()
-sunrise = 今日日出时刻 (如 04:51)
-sunset  = 今日日落时刻 (如 18:56)
-        │
-        ▼  每分钟检查 (QTimer 60s)
-now ∈ [sunrise, sunset) → *SET:MODE DAY
-now ∉ [sunrise, sunset) → *SET:MODE NIGHT
-        │
-        ▼  UI 控制
-☑ 自动昼夜模式 (QCheckBox, 默认开启)
-[强制白天] / [强制夜间] (取消自动后手动切换)
+```mermaid
+flowchart TD
+    A["上海经纬度<br/>(31.23°N, 121.47°E)<br/>时区 Asia/Shanghai"] --> B["Astral sun()"]
+    B --> C1["sunrise<br/>日出时刻 (如 04:51)"]
+    B --> C2["sunset<br/>日落时刻 (如 18:56)"]
+    C1 --> D{"QTimer 每分钟检查<br/>now 是否在 [sunrise, sunset) 内?"}
+    C2 --> D
+    D -->|"是"| E["*SET:MODE DAY"]
+    D -->|"否"| F["*SET:MODE NIGHT"]
+    E --> G["UI 控件<br/>☑ 自动昼夜模式 默认开启<br/>强制白天 / 强制夜间"]
+    F --> G
 ```
 
 | 模式 | MCU 行为 | PC 镜像 |
@@ -645,7 +644,7 @@ def install_excepthook():
 
 ### 6.1 主界面全貌
 
-![主界面全貌](./images/主界面全貌.jpg)
+> **[此处插入上位机主界面截图]**
 
 **图 1：PC 上位机主界面** — 左侧数字孪生镜像面板（8SEG + 8LED + 10按键），中间控制面板（核心/扩展/协议三Tab），右侧四色日志窗口。底部状态栏显示连接状态、FORMAT、MODE、ALARM、延迟。
 
@@ -653,7 +652,7 @@ def install_excepthook():
 
 ### 6.2 数字孪生面板特写
 
-![数字孪生面板特写](./images/数字孪生面板.jpg)
+> **[此处插入数字孪生面板与 MCU 实物同框截图]**
 
 **图 2：数字孪生面板与 S800 实物同框** — 左侧 PC 镜像面板，右侧 S800 板卡实物。两者 7SEG 显示内容、LED 亮灭状态完全一致，验证双向同步。
 
@@ -661,7 +660,7 @@ def install_excepthook():
 
 ### 6.3 数据可视化看板
 
-![数据可视化看板](./images/数据可视化看板.jpg)
+> **[此处插入数据看板截图]**
 
 **图 3：数据可视化看板** — 三张 Matplotlib 图表并列展示：Alarm by Hour（柱状图）、NTP Delta（折线图）、Key Heat（条形图）。底部有「刷新图表」和「导出 CSV」按钮。
 
@@ -669,7 +668,7 @@ def install_excepthook():
 
 ### 6.4 错误弹窗提示
 
-![错误弹窗提示](./images/错误弹窗提示.jpg)
+> **[此处插入错误弹窗提示截图]**
 
 **图 4：异常处理弹窗** — 左侧：串口占用时的错误弹窗；中间：网络超时弹窗；右侧：ASCII 校验拦截弹窗。
 
@@ -677,14 +676,15 @@ def install_excepthook():
 
 ### 6.5 协议容错演示
 
-![协议容错演示1](./images/协议容错演示1.jpg)
-![协议容错演示2](./images/协议容错演示2.jpg)
+> **[此处插入协议面板截图]**
 
 **图 5：协议面板** — 多参数组合下拉框（6 种）、缩写演示按钮、大小写混合演示按钮、原始指令输入框。
 
 ---
 
 ## 7. 联调演示要点
+
+> 以下内容对应演示视频中 PC 端必须呈现的画面。
 
 ### 7.1 双窗口并排
 
