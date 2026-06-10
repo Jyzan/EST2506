@@ -1886,9 +1886,9 @@ static void Process_Command(char *line)
     }
 
     if (Token_Matches(argv[0], "*SET:DATE") || Token_Matches(argv[0], "*SET:TIME") || Token_Matches(argv[0], "*SET:ALARM")) {
-        if (g_edit_state != ST_IDLE) { UART_PutString("ERROR BUSY\r\n"); return; }
         bool is_date = Token_Matches(argv[0], "*SET:DATE");
         bool is_time = Token_Matches(argv[0], "*SET:TIME");
+        if (g_edit_state != ST_IDLE) { UART_PutString("ERROR BUSY\r\n"); return; }
         if (!is_date && !is_time && argc == 2 && Token_Matches(argv[1], "OFF")) {
             g_alarm.enabled = 0;
             g_alarm.ringing = 0;

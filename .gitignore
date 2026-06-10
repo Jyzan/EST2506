@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 pc_host/.venv/
 pc_host/events.csv
+.venv/
 
 # ── Keil uVision ──
 mcu/.vscode/
