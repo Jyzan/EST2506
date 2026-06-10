@@ -1,0 +1,15 @@
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+pc_host/.venv/
+pc_host/events.csv
+
+# ── Keil uVision ──
+mcu/.vscode/
+mcu/Listings/
+mcu/Objects/
+mcu/RTE/
+*.uvguix.*
+*.scvd
+*.jlink

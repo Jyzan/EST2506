@@ -1,0 +1,84 @@
+import queue
+import time
+
+import serial
+import serial.tools.list_ports
+from PyQt5.QtCore import QThread, pyqtSignal
+
+
+class SerialWorker(QThread):
+    line_received = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+    latency_updated = pyqtSignal(int)
+    error = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.port = ""
+        self.baud = 115200
+        self._running = False
+        self._ser = None
+        self._tx = queue.Queue()
+
+    @staticmethod
+    def list_ports():
+        return list(serial.tools.list_ports.comports())
+
+    def open(self, port: str, baud: int = 115200):
+        self.port = port
+        self.baud = baud
+        self.start()
+
+    def close(self):
+        self._running = False
+        self.wait(1500)
+
+    def write_line(self, line: str):
+        self._tx.put(line.rstrip("\r\n") + "\r\n")
+
+    def run(self):
+        self._running = True
+        try:
+            self._ser = serial.Serial(
+                self.port,
+                self.baud,
+                timeout=0.1,
+                write_timeout=0.4,
+                dsrdtr=False,
+                rtscts=False,
+                xonxoff=False,
+            )
+            self._ser.setDTR(False)
+            self._ser.setRTS(False)
+            self.connection_changed.emit(True)
+        except Exception as exc:
+            self.error.emit(f"open {self.port} failed: {exc}")
+            self.connection_changed.emit(False)
+            return
+
+        buf = bytearray()
+        while self._running:
+            try:
+                while not self._tx.empty():
+                    self._ser.write(self._tx.get_nowait().encode("ascii", errors="ignore"))
+                chunk = self._ser.read(128)
+                if chunk:
+                    buf.extend(chunk)
+                    while b"\n" in buf:
+                        line, _, rest = buf.partition(b"\n")
+                        buf = bytearray(rest)
+                        text = line.decode("ascii", errors="replace").strip()
+                        if text:
+                            self.line_received.emit(text)
+                else:
+                    time.sleep(0.005)
+            except Exception as exc:
+                self.error.emit(f"serial error: {exc}")
+                break
+
+        try:
+            if self._ser:
+                self._ser.close()
+        except Exception:
+            pass
+        self.connection_changed.emit(False)
