@@ -1,10 +1,3 @@
-# Form implementation generated from reading ui file 'main_window.ui'.
-#
-# Equivalent to `pyuic5 main_window.ui -o ui_main_window.py`.
-# Builds the static window chrome (connection bar + content host + status bar);
-# the dynamic mirror / control / log panels are injected by main.py into
-# `content_layout` so the custom QPainter widgets stay explicit.
-
 from PyQt5 import QtCore, QtWidgets
 
 

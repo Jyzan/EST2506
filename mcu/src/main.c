@@ -22,10 +22,10 @@
 #define SYS_CLOCK_HZ         20000000U
 #define SYSTICK_HZ           1000U
 #define UART_BAUD            115200U
-#define LINE_MAX             64    /* §4: max command line length (excl. CR/LF) */
-#define DISP_LEN             8     /* §2: number of 7-seg digits */
-#define DISPLAY_TIMER_HZ     1000U /* 1 ms scan tick, hardware-driven */
-#define KEY_SCAN_TICKS       20U   /* sample TCA keys every 20 scan ticks (ISR) */
+#define LINE_MAX             64    // §4 串口命令最大长度 不含回车换行
+#define DISP_LEN             8     // §2 数码管位数 共 8 位
+#define DISPLAY_TIMER_HZ     1000U // §2 定时器驱动数码管动态扫描 1ms 周期
+#define KEY_SCAN_TICKS       20U   // §3 每 20 次扫描中断采样一次 TCA 按键
 #define KEY_DEBOUNCE_COUNT   1U
 #define ADD_REPEAT_MS        200U
 #define FUNC_LONG_MS         800U
@@ -33,7 +33,7 @@
 #define WEATHER_VALID_MS     1800000UL
 
 #define I2C_BUS_HZ           400000U
-#define TCA6424_AUTO_INC     0x80     /* command-byte AI bit: reg auto-increment */
+#define TCA6424_AUTO_INC     0x80     // 命令字节自动递增位 连续写多寄存器时自动跳转
 #define TCA6424_I2CADDR      0x22
 #define PCA9557_I2CADDR      0x18
 #define PCA9557_OUTPUT       0x01
@@ -59,44 +59,44 @@
 #define WEATHER_SNO     4
 #define WEATHER_FOG     5
 
-/* ---- §3 key codes / events ---- */
+// ---- §3 按键码与按键事件类型 ----
 typedef enum {
     KEY_NONE = 0, KEY_FUNC, KEY_SHIFT, KEY_ADD, KEY_SAVE,
     KEY_DISP, KEY_SPEED, KEY_FORMAT, KEY_EXT, KEY_USER1, KEY_USER2
 } key_code_t;
-#define KEY_COUNT 10   /* hardware bit = key_code - 1, bits 0..9 */
+#define KEY_COUNT 10   // 硬件按键位 = key_code - 1 共 10 位
 
 typedef enum { KEV_NONE, KEV_DOWN, KEV_UP, KEV_LONG, KEV_REPEAT } key_event_t;
 
-/* ---- §9 edit FSM ---- */
+// ---- §9 编辑有限状态机 ----
 typedef enum { ST_IDLE, ST_EDIT_DATE, ST_EDIT_TIME, ST_EDIT_ALARM } edit_state_t;
 
-/* ---- §7 display format ---- */
+// ---- §7 显示方向枚举 ----
 typedef enum { FMT_LEFT, FMT_RIGHT } format_t;
 
-/* ---- §6 date / time ---- */
+// ---- §6 日期与时间数据结构 ----
 typedef struct { uint16_t y; uint8_t m, d, wday; } date_t;
 typedef struct { uint8_t h, mi, s; } time_t_;
 
-/* ---- §8 alarm ---- */
+// ---- §8 闹钟数据结构 ----
 typedef struct { time_t_ t; uint8_t enabled, ringing; } alarm_t;
 
-/* ============================ §1 system timebase ============================ */
+// ============================ §1 系统时基 1ms 节拍 ============================
 static uint32_t g_sys_clock;
 volatile uint32_t g_tick_ms;
 volatile uint8_t flag_5ms, flag_10ms, flag_100ms, flag_1s;
 
-/* ============================ §4 UART RX/TX state ============================ */
-volatile uint8_t rx_line_ready;     /* number of complete lines waiting in the ring */
-char cmd_line[LINE_MAX];            /* current command line handed to Process_Command */
+// ============================ §4 串口接收 / 发送缓冲区 ============================
+volatile uint8_t rx_line_ready;     // 环形缓冲区中已完整接收的行数
+char cmd_line[LINE_MAX];            // 当前交给 Process_Command 解析的命令行
 static volatile bool g_line_too_long;
 
 #define RX_RING_SIZE 256U
 static char g_rx_ring[RX_RING_SIZE];
 static volatile uint16_t g_rx_head;
 static volatile uint16_t g_rx_tail;
-/* The RX ISR assembles a line here so a partial (or over-length) line is never
-   pushed into the ring; only complete lines are committed atomically. */
+/* 接收中断将字节组装成行后写入环形缓冲区，超长行丢弃并置标志位，
+   避免半行 / 超长行被主循环取走导致解析错位 */
 static char g_rx_asm[LINE_MAX + 2];
 static uint8_t g_rx_asm_len;
 static bool g_rx_asm_ovf;
@@ -106,20 +106,20 @@ static char g_uart_tx[UART_TX_SIZE];
 static volatile uint16_t g_tx_head;
 static volatile uint16_t g_tx_tail;
 
-/* ============================ §6/§8 clock state ============================ */
+// ============================ §6 §8 时钟 / 闹钟运行状态 ============================
 static date_t   g_date = {2026, 6, 1, 0};
 static time_t_  g_time = {0, 0, 0};
 static date_t   g_edit_date = {2026, 6, 1, 0};
 static time_t_  g_edit_time = {0, 0, 0};
 static alarm_t  g_alarm = {{12, 0, 0}, 0, 0};
 static alarm_t  g_edit_alarm = {{12, 0, 0}, 0, 0};
-/* alarm runtime fields (doc struct is the minimal set) */
+// 闹钟运行时字段 响铃起始时刻 / 上次蜂鸣翻转时刻 / 当前蜂鸣电平 / 最大响铃时长
 static uint32_t g_alarm_ring_start_ms = 0;
 static uint32_t g_alarm_last_beep_ms = 0;
 static uint8_t  g_alarm_beep_on = 0;
 static uint16_t g_ring_limit_ms = 10000;
 
-/* ============================ mode / misc state ============================ */
+// ============================ 运行模式 / 杂项状态 ============================
 static format_t g_format = FMT_LEFT;
 static uint8_t g_mode = MODE_DAY;
 static uint8_t g_display_mode = DISP_TIME;
@@ -138,29 +138,29 @@ static uint32_t g_weather_until_ms = 0;
 static bool g_countdown_active = false;
 static uint32_t g_countdown_end_ms = 0;
 
-/* ============================ §2 display state ============================ */
-uint8_t disp_buf[DISP_LEN];           /* per-digit ASCII character */
-uint8_t disp_dp[DISP_LEN];            /* per-digit decimal point (0/1) */
-uint8_t disp_blink_mask = 0;          /* per-digit blink enable (0 = steady) */
-uint8_t disp_on = 1;                  /* whole-display on/off */
+// ============================ §2 数码管显示状态 ============================
+uint8_t disp_buf[DISP_LEN];           // 每位显示的 ASCII 字符
+uint8_t disp_dp[DISP_LEN];            // 每位小数点状态 0 灭 1 亮
+uint8_t disp_blink_mask = 0;          // 每位闪烁使能 0 常亮
+uint8_t disp_on = 1;                  // 整屏亮灭开关
 static uint8_t g_scan_pos = 0;
 static uint8_t g_scan_limit = 8;
 
 static uint8_t g_led_byte = 0x00;
 static volatile bool g_led_dirty = true;
 static bool g_led_override = false;
-static uint32_t g_led_override_ms = 0;   /* time of last *SET:LED, for 10s auto-release */
+static uint32_t g_led_override_ms = 0;   // 最后一次 *SET:LED 的时刻 用于 10s 自动退出接管
 
-static volatile uint8_t g_tca_key_raw = 0;        /* key bits sampled in timer ISR */
-static volatile uint8_t g_i2c_fail_count = 0;     /* consecutive scan I2C failures */
-static volatile uint16_t g_i2c_recover_count = 0; /* total bus recoveries */
+static volatile uint8_t g_tca_key_raw = 0;        // 定时器中断中采样的 TCA 按键电平
+static volatile uint8_t g_i2c_fail_count = 0;     // 连续 I2C 扫描失败计数
+static volatile uint16_t g_i2c_recover_count = 0; // I2C 总线恢复累计次数
 static uint16_t g_i2c_recover_reported = 0;
 static volatile bool g_i2c_recover_request = false;
 
 static uint32_t g_serial_activity_until_ms = 0;
-static volatile bool g_tx_is_led_evt = false;  /* gate: LED-event TX must not re-arm RXTX */
+static volatile bool g_tx_is_led_evt = false;  // 门控 发送 LED 事件时不重新激活串口活动指示灯
 static char g_message[33] = "";
-static uint32_t g_message_dp = 0;           /* dp bitmap for message display (1 bit/char) */
+static uint32_t g_message_dp = 0;           // 消息小数点 bitmap 每字符 1 bit
 static uint32_t g_message_until_ms = 0;
 static bool g_ntp_synced = false;
 static uint32_t g_ntp_last_sync_ms = 0;
@@ -169,23 +169,23 @@ static char g_last_sent_disp[9] = "";
 static uint8_t g_last_sent_dp = 0xff;
 static uint8_t g_last_sent_led = 0xff;
 
-/* ============================ §7 scroll module ============================ */
-static char scroll_buf[40];           /* §7: N >= 32 */
+// ============================ §7 流水滚动模块 ============================
+static char scroll_buf[40];           // 滚动源文本缓冲区 长度 >= 32
 static uint8_t scroll_len = 0;
-static uint32_t scroll_src_dp = 0;    /* dp bit per source character (0..scroll_len-1) */
-static uint8_t scroll_off = 0;        /* marquee step index s (0..scroll_len+6) */
+static uint32_t scroll_src_dp = 0;    // 源文本每字符的小数点 bit
+static uint8_t scroll_off = 0;        // 流水步进偏移 s 从 0 到 scroll_len+6
 static uint32_t scroll_last_ms = 0;
-static char g_scroll_cur[40] = "";    /* last content handed to Scroll_Set */
-static bool scroll_completed = false; /* set true once the last frame was shown */
+static char g_scroll_cur[40] = "";    // 上一次传给 Scroll_Set 的文本 用于判重
+static bool scroll_completed = false; // 最后一帧显示完毕 标记整趟流水结束
 
-/* ============================ §3 key module ============================ */
+// ============================ §3 按键扫描模块 ============================
 static uint16_t g_key_stable = 0;
 static uint16_t g_key_last_raw = 0;
 static uint8_t g_key_same_count = 0;
-static uint8_t g_key_fsm[KEY_COUNT];        /* 0 idle, 1 pressed, 2 long */
+static uint8_t g_key_fsm[KEY_COUNT];        // 每键状态机 0 空闲 1 按下 2 长按
 static uint32_t g_key_press_ms[KEY_COUNT];
 static uint32_t g_key_repeat_ms[KEY_COUNT];
-static bool g_func_armed = false;           /* FUNC pressed while editing (defer) */
+static bool g_func_armed = false;           // 编辑中按下 FUNC 暂不处理 等抬起/长按再决定
 static bool g_user1_armed = false;
 
 #define KEY_EVQ_SIZE 16U
@@ -198,7 +198,7 @@ static const char *KEY_NAMES[11] = {
 };
 static const uint8_t SEG_DIGIT[10] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f};
 
-/* ============================ forward declarations ============================ */
+// ============================ 函数前向声明 ============================
 static uint8_t I2C0_WriteByte(uint8_t dev, uint8_t reg, uint8_t data);
 static uint8_t I2C0_WriteTwo(uint8_t dev, uint8_t reg, uint8_t d0, uint8_t d1);
 static uint8_t I2C0_ReadByte(uint8_t dev, uint8_t reg);
@@ -248,7 +248,8 @@ static void Send_OK_Value(const char *value);
 static void Show_Ntp_Status(void);
 static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms);
 
-/* ============================ §1 SysTick ============================ */
+/* §1 SysTick 每 1ms 触发一次 递增全局节拍计数器并设置各时间片标志位。
+   中断优先级设为最低 仅置位标志 不在中断内做重活 */
 void SysTick_Handler(void)
 {
     g_tick_ms++;
@@ -263,10 +264,9 @@ static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms)
     return (uint8_t)((g_tick_ms - start) >= span_ms);
 }
 
-/* Hardware-timed display scan. Runs every 1 ms regardless of what the
-   main loop is doing, so the dynamic scan never stalls. All I2C bus
-   access lives here (display refresh, key sampling, LED flush) so the
-   main loop never contends with the scan on the shared I2C0 bus. */
+/* 硬件定时器驱动显示扫描 每 1ms 触发一次 与主循环完全解耦。
+   所有 I2C 总线操作集中在此中断内完成 包括数码管刷新 / LED 状态写入 / 按键采样。
+   主循环不直接操作 I2C0 总线 避免与扫描竞争 */
 void TIMER0A_Handler(void)
 {
     static uint8_t key_div = 0;
@@ -292,11 +292,9 @@ void TIMER0A_Handler(void)
     }
 }
 
-/* §4: UART RX is interrupt-driven. The UART ISR has the highest priority of
-   the active interrupts (above the timer scan), so a byte arriving always
-   preempts a blocking I2C transaction and the 16-byte RX FIFO never overruns.
-   This handler only touches ring buffers, never I2C, so preempting the scan
-   is safe. */
+/* §4 串口中断服务 接收侧由 RX FIFO 触发 优先级高于定时器扫描。
+   当 I2C 事务阻塞时 到达的字节可抢占并安全存入环形缓冲区。
+   ISR 仅操作环形缓冲 绝不访问 I2C 总线 因此抢占扫描是安全的 */
 void UART0_Handler(void)
 {
     uint32_t status = UARTIntStatus(UART0_BASE, true);
@@ -321,9 +319,9 @@ void UART0_Handler(void)
     }
 }
 
-/* Assemble a line in g_rx_asm; on CR/LF commit the complete line (plus a '\n'
-   delimiter) into the byte ring atomically. Over-length lines are discarded
-   and flagged so the main loop can emit ERROR LINE TOO LONG. */
+/* 在 g_rx_asm 中逐字节组装一行 遇到 CR/LF 时将完整行写入环形缓冲区。
+   超长行丢弃并设 g_line_too_long 标志 主循环随后回传 ERROR LEN。
+   空行忽略不提交 */
 static void UART_RxIsrHandler(uint8_t byte)
 {
     uint8_t i;
@@ -335,7 +333,7 @@ static void UART_RxIsrHandler(uint8_t byte)
             g_line_too_long = true;
             return;
         }
-        if (g_rx_asm_len == 0) return;   /* empty line: ignore */
+        if (g_rx_asm_len == 0) return;   // 忽略空行
         Mark_Serial_Activity();
         for (i = 0; i < g_rx_asm_len; i++) {
             uint16_t next = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
@@ -357,13 +355,13 @@ static void UART_RxIsrHandler(uint8_t byte)
     }
 
     if (g_rx_asm_len >= LINE_MAX) {
-        g_rx_asm_ovf = true;   /* keep consuming until CR/LF */
+        g_rx_asm_ovf = true;   // 继续消耗字节直到 CR/LF
         return;
     }
     g_rx_asm[g_rx_asm_len++] = (char)byte;
 }
 
-/* Extract one complete line (terminated by '\n' in the ring) into out. */
+// 从环形缓冲区取出一行 以 '\n' 作为行分隔符 写入 out
 static bool UART_GetLine(char *out, uint16_t max)
 {
     uint16_t len = 0;
@@ -396,13 +394,11 @@ int main(void)
     SysTickEnable();
     SysTickIntEnable();
     IntPriorityGroupingSet(3);
-    IntPrioritySet(FAULT_SYSTICK, 0xE0);      /* lowest: 1 ms timebase only sets flags */
-    IntPrioritySet(INT_UART0, 0x20);          /* highest: the 16-byte RX FIFO fills in
-                                                 ~1.4 ms @115200, so receiving a byte
-                                                 must preempt the display scan or the
-                                                 FIFO overruns. The UART ISR only
-                                                 touches ring buffers, never I2C. */
-    IntPrioritySet(INT_TIMER0A, 0x40);        /* display scan / I2C below UART */
+    IntPrioritySet(FAULT_SYSTICK, 0xE0);      // SysTick 优先级最低 仅置位标志不做重活
+    IntPrioritySet(INT_UART0, 0x20);          /* 串口优先级最高 115200 下 16 字节 RX FIFO 约 1.4ms 填满
+                                                 必须能抢占显示扫描 否则丢字节
+                                                 ISR 仅操作环形缓冲 不碰 I2C */
+    IntPrioritySet(INT_TIMER0A, 0x40);        // 显示扫描 / I2C 优先级在串口之下
     UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
     IntEnable(INT_UART0);
     IntEnable(INT_TIMER0A);
@@ -418,16 +414,19 @@ int main(void)
             key_event_t e;
             flag_10ms = 0;
 
+            // 扫描按键并消费全部事件
             Key_Scan();
             while ((e = Key_GetEvent(&k)) != KEV_NONE) {
                 Dispatch_Key(e, k);
             }
 
+            // 生成全局闪烁基准 500ms 周期方波 供编辑态高亮和 LED 慢闪复用
             g_blink_on = (((g_tick_ms / 500U) & 1U) == 0U);
+            // 根据当前模式/状态构建显示内容 并刷新 LED 含义
             Build_Display();
             Update_Status_LED();
 
-            /* Push display/LED changes promptly (PC mirror latency < 200 ms). */
+            // §16 显示或 LED 变化时立即上报 保证 PC 镜像延迟 < 200ms
             {
                 uint8_t bm = Disp_Bitmap();
                 if (memcmp(disp_buf, g_last_sent_disp, DISP_LEN) != 0 || bm != g_last_sent_dp) {
@@ -459,8 +458,7 @@ int main(void)
         }
 
         if (g_i2c_recover_request) {
-            /* Recover the stuck bus here, not in the timer ISR. Pause the
-               scan ISR so it can't touch I2C mid-recovery, then bit-bang. */
+            // 在主循环中恢复 I2C 总线 先暂停扫描 ISR 避免恢复期间触碰 I2C
             g_i2c_recover_request = false;
             IntDisable(INT_TIMER0A);
             I2C0_BusRecover();
@@ -475,7 +473,7 @@ int main(void)
         if (flag_1s) {
             flag_1s = 0;
             Time_Tick_1s();
-            /* 1 Hz full heartbeat (§16: send every second even if unchanged). */
+            // 1Hz 全量心跳 即使无变化也每秒发送一次
             Send_Display_Event();
             memcpy(g_last_sent_disp, disp_buf, DISP_LEN);
             g_last_sent_disp[DISP_LEN] = '\0';
@@ -528,11 +526,11 @@ static void I2C0_Init(void)
     Display_Init();
 }
 
-/* Run the bus at 200 kHz. TivaWare's bool API only offers 100 k/400 k;
-   400 k proved marginal on this board (long traces + UART switching
-   noise), 100 k would eat most of the 1 ms scan budget. So init at the
-   standard rate, then override the clock divider:
-   SCL = SysClk / (2*(SCL_LP+SCL_HP)*(TPR+1)) with LP=6, HP=4. */
+/* I2C 时钟设为 200kHz。TivaWare 标准 API 仅提供 100k/400k 两档
+   400k 在长走线 + 串口开关噪声下不可靠 100k 会吃掉 1ms 扫描预算的大部分。
+   因此先用标准速率初始化 再手动改写时钟分频 MTPR 寄存器微调。
+   SCL 计算公式 = SysClk / (2 * (SCL_LP + SCL_HP) * (TPR + 1))
+   其中 LP=6 HP=4 */
 static void I2C0_SetSpeed(void)
 {
     I2CMasterInitExpClk(I2C0_BASE, g_sys_clock, false);
@@ -540,8 +538,8 @@ static void I2C0_SetSpeed(void)
     I2CMasterEnable(I2C0_BASE);
 }
 
-/* §2: initialize both expanders' direction/output registers. Used at startup
-   and after a bus recovery so the chips are in a known state. */
+/* §2 初始化两个 I2C 扩展芯片的方向与输出寄存器。
+   启动时调用一次 总线恢复后也需重配 保证芯片处于已知状态 */
 static void Display_Init(void)
 {
     I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_CONFIG_PORT0, 0xff);
@@ -551,28 +549,27 @@ static void Display_Init(void)
     I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, (uint8_t)~g_led_byte);
 }
 
-/* Free a hung I2C bus. If a transaction was aborted mid-byte a slave may
-   still be driving SDA low, which keeps the master perpetually "busy" and
-   every later write fails -> digits stay dark forever. The cure is to take
-   the pins to GPIO and manually pulse SCL up to 9 times until the slave
-   releases SDA, issue a STOP, then hand the pins back to the I2C hardware
-   and re-init. This is the routine that makes the dark state self-heal. */
+/* I2C 总线卡死恢复 若传输中途被打断 从机可能持续拉低 SDA
+   导致主机永远忙 后续所有 I2C 写操作失败 数码管全暗。
+   恢复流程 将 SCL/SDA 切为 GPIO 手动翻转 SCL 最多 9 次
+   直到从机释放 SDA 再发 STOP 最后交还 I2C 硬件并重配。
+   此函数在 main 中调用 不在 ISR 内 避免阻塞中断 */
 static void I2C0_BusRecover(void)
 {
     uint32_t i;
 
-    GPIOPinTypeGPIOOutputOD(GPIO_PORTB_BASE, GPIO_PIN_2);   /* SCL */
-    GPIOPinTypeGPIOInput(GPIO_PORTB_BASE, GPIO_PIN_3);       /* SDA, read */
+    GPIOPinTypeGPIOOutputOD(GPIO_PORTB_BASE, GPIO_PIN_2);   // SCL 设为开漏输出
+    GPIOPinTypeGPIOInput(GPIO_PORTB_BASE, GPIO_PIN_3);       // SDA 设为输入检测释放状态
     GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_2, GPIO_PIN_2);
 
     for (i = 0; i < 9U; i++) {
         if (GPIOPinRead(GPIO_PORTB_BASE, GPIO_PIN_3) & GPIO_PIN_3) {
-            break;  /* SDA released */
+            break;  // SDA 已释放
         }
         GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_2, 0);
-        SysCtlDelay(g_sys_clock / 600000U);   /* ~5 us low */
+        SysCtlDelay(g_sys_clock / 600000U);   // SCL 低电平约 5us
         GPIOPinWrite(GPIO_PORTB_BASE, GPIO_PIN_2, GPIO_PIN_2);
-        SysCtlDelay(g_sys_clock / 600000U);   /* ~5 us high */
+        SysCtlDelay(g_sys_clock / 600000U);   // SCL 高电平约 5us
     }
 
     GPIOPinTypeGPIOOutputOD(GPIO_PORTB_BASE, GPIO_PIN_3);
@@ -607,8 +604,7 @@ static void UART_Init(uint32_t baud)
     UARTConfigSetExpClk(UART0_BASE, g_sys_clock, baud,
                         UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE);
     UARTFIFOEnable(UART0_BASE);
-    /* RX trips the interrupt at 1/8 full plus the receive-timeout, so bytes are
-       pulled out of the FIFO eagerly and it never overruns. */
+    // RX 在 FIFO 达 1/8 满或接收超时时触发中断 及时取走字节 永不溢出
     UARTFIFOLevelSet(UART0_BASE, UART_FIFO_TX1_8, UART_FIFO_RX1_8);
 }
 
@@ -622,10 +618,9 @@ static void Timer0_Init(void)
     TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
 }
 
-/* Bounded spin. This runs inside the 1 ms display-scan ISR, so the cap
-   must stay short: a 200 kHz byte completes in ~45 us (~3000 cycles), and
-   2000 iterations (~300 us) covers a normal transfer while bailing fast on
-   a wedged bus so the UART RX FIFO is never starved long enough to overrun. */
+/* 带超时的 I2C 忙等待 运行在 1ms 扫描 ISR 内 所以上限必须很短。
+   200kHz 下一个字节约 45us 2000 次轮询约 300us 覆盖正常传输
+   若总线卡死则快速退出 避免饿死 UART RX FIFO */
 static bool I2C0_WaitIdle(void)
 {
     uint32_t timeout = 2000U;
@@ -640,16 +635,15 @@ static bool I2C0_WaitIdle(void)
     return true;
 }
 
-/* TM4C erratum/race: the BUSY flag takes a few system clocks to assert
-   after I2CMasterControl(). Polling I2CMasterBusy() immediately can read
-   "idle" while the transfer is still starting, which lets the caller
-   overwrite MDR mid-transmission and corrupt the byte on the wire. Wait
-   for BUSY to assert (bounded spin) before waiting for it to clear. */
+/* TM4C 硬件勘误 发出 I2CMasterControl 后 BUSY 标志需要几个时钟周期才置位。
+   如果马上轮询 I2CMasterBusy 可能读到 "空闲" 但传输实际已开始
+   后续代码可能中途改写 MDR 寄存器导致线上数据损坏。
+   因此先等待 BUSY 置位 再等它清除 */
 static bool I2C0_WaitTransfer(void)
 {
     uint32_t spin = 0;
     while (!I2CMasterBusy(I2C0_BASE)) {
-        if (++spin > 200U) break;  /* transfer already finished */
+        if (++spin > 200U) break;  // BUSY 极快置位 传输已完成
     }
     return I2C0_WaitIdle();
 }
@@ -675,8 +669,8 @@ static uint8_t I2C0_WriteByte(uint8_t dev, uint8_t reg, uint8_t data)
     return err;
 }
 
-/* Write two consecutive registers in one bus transaction using the
-   TCA6424 auto-increment bit (caller ORs TCA6424_AUTO_INC into reg). */
+/* 利用 TCA6424 自动递增位 一次总线事务连续写入相邻两个寄存器。
+   调用方需将 TCA6424_AUTO_INC 与起始寄存器地址按位或后传入 */
 static uint8_t I2C0_WriteTwo(uint8_t dev, uint8_t reg, uint8_t d0, uint8_t d1)
 {
     uint8_t err;
@@ -720,13 +714,9 @@ static uint8_t I2C0_ReadByte(uint8_t dev, uint8_t reg)
 
 static void UART_PutString(const char *s)
 {
-    /* Non-blocking: queue into the TX ring buffer and let the UART
-       TX interrupt drain it, so the display scan never stalls.
-       RXTX (LED3) is a true serial-activity indicator: every TX marks
-       activity here, and RX marks it in UART_RxIsrHandler. The lone
-       exception is the LED *EVT itself (g_tx_is_led_evt) — counting it
-       would re-arm the window on every LED change and self-oscillate
-       (LED 01 <-> 09), so that one transmission is gated out. */
+    /* 非阻塞发送 将字符串写入 TX 环形缓冲区 由 UART TX 中断消费。
+       发送 LED 事件时设 g_tx_is_led_evt 门控 避免自身触发串口活动指示灯
+       否则每次 LED 变化 TX 又点亮 LED3 形成自激振荡 */
     if (!g_tx_is_led_evt) {
         Mark_Serial_Activity();
     }
@@ -734,7 +724,7 @@ static void UART_PutString(const char *s)
     while (*s) {
         uint16_t next = (uint16_t)((g_tx_head + 1U) % UART_TX_SIZE);
         if (next == g_tx_tail) {
-            break; /* buffer full: drop the rest, never block */
+            break; // 缓冲区满 丢弃剩余字节 绝不阻塞
         }
         g_uart_tx[g_tx_head] = *s++;
         g_tx_head = next;
@@ -760,14 +750,13 @@ static void UART_Printf(const char *fmt, ...)
 
 static void Mark_Serial_Activity(void)
 {
-    /* Only record the activity window. The LED3 bit itself is owned solely by
-       Update_Status_LED (it adds 0x08 while g_serial_activity_until_ms is in the
-       future, and only outside night mode). Poking g_led_byte directly here
-       would bypass that masking and flash the physical LED in night mode. */
+    /* 仅记录串口活动时间窗口 LED3 由 Update_Status_LED 统一管理。
+       在这里直接写 g_led_byte 会绕过夜间模式抑制导致物理 LED 误亮 */
     g_serial_activity_until_ms = g_tick_ms + SERIAL_LED_MS;
 }
 
-/* ============================ §2 display ============================ */
+// ============================ §2 数码管显示驱动 ============================
+// 将 8 位小数点状态打包为一个字节 每 bit 对应一位
 static uint8_t Disp_Bitmap(void)
 {
     uint8_t i, b = 0;
@@ -777,10 +766,9 @@ static uint8_t Disp_Bitmap(void)
     return b;
 }
 
-/* §2: set the 8-digit text plus a decimal-point bitmap. Expands dp_bitmap into
-   the per-digit disp_dp[] array, then commits chars + dp + scan limit atomically
-   w.r.t. the scan ISR so it never reads a half-updated frame. The scan limit
-   trims trailing blank digits to kill ghosting. */
+/* 设置 8 位数码管文本与小数点 bitmap。先将 dp_bitmap 展开到每位的 disp_dp 数组
+   再原子写入 disp_buf / disp_dp / g_scan_limit 三个字段 确保扫描 ISR 不会读到半帧。
+   g_scan_limit 裁掉尾部空白位 消除鬼影 */
 static void Display_SetStr(const char *s, uint8_t dp_bitmap)
 {
     uint8_t i, limit, done = 0;
@@ -818,7 +806,7 @@ static void Set_LED(uint8_t value)
         return;
     }
     g_led_byte = value;
-    g_led_dirty = true;   /* flushed to PCA9557 by the timer ISR */
+    g_led_dirty = true;   // 置脏标志 定时器 ISR 下次扫描时写入 PCA9557
 }
 
 static uint8_t SegCode(char c)
@@ -858,8 +846,8 @@ static uint8_t SegCode(char c)
     }
 }
 
-/* §2: refresh exactly one digit. Called from the 1 ms timer ISR. Honors
-   disp_on (whole-display blank) and disp_blink_mask (per-digit blink). */
+/* §2 每次刷新一位数码管 由 1ms 定时器 ISR 调用。
+   支持 disp_on 整屏熄灭和 disp_blink_mask 按位闪烁 */
 static void Display_Refresh(void)
 {
     static bool blanked = false;
@@ -868,9 +856,8 @@ static void Display_Refresh(void)
     bool blink_off;
 
     if (!disp_on) {
-        /* Blank once on entry, not every 1 ms tick: hammering the I2C bus
-           with two blocking writes per tick can stall this high-rate ISR
-           long enough to starve the UART RX FIFO. */
+        /* 仅在首次进入熄灭态时写一次 I2C 若每个 tick 都写两次字节
+           会在高频 ISR 中卡住足够长时间饿死 UART RX FIFO */
         if (!blanked) {
             I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT2, 0x00);
             I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT1, 0x00);
@@ -888,8 +875,7 @@ static void Display_Refresh(void)
     code = blink_off ? 0U : SegCode((char)disp_buf[g_scan_pos]);
     if (!blink_off && disp_dp[g_scan_pos]) code |= 0x80;
 
-    /* Blank the digit select to kill ghosting, then write segments (PORT1)
-       and the new digit select (PORT2) in a single auto-increment burst. */
+    // 先清零位选消除鬼影 再通过一次自动递增突发写入段码 PORT1 和新位选 PORT2
     err |= I2C0_WriteByte(TCA6424_I2CADDR, TCA6424_OUTPUT_PORT2, 0x00);
     err |= I2C0_WriteTwo(TCA6424_I2CADDR,
                          (uint8_t)(TCA6424_OUTPUT_PORT1 | TCA6424_AUTO_INC),
@@ -898,9 +884,8 @@ static void Display_Refresh(void)
     if (err != 0U) {
         if (g_i2c_fail_count < 255U) g_i2c_fail_count++;
         if (g_i2c_fail_count >= 3U) {
-            /* Don't recover here: I2C0_BusRecover() bit-bangs SCL with
-               SysCtlDelay for several ms, which would starve the UART RX
-               FIFO and drop bytes. Ask the main loop to do it instead. */
+            /* 不在 ISR 内恢复 I2C0_BusRecover 需要数 ms 级 bit-bang
+               会饿死 UART RX FIFO 丢字节 交给主循环执行 */
             g_i2c_recover_request = true;
         }
     } else {
@@ -913,7 +898,8 @@ static void Display_Refresh(void)
     }
 }
 
-/* ============================ §7 scroll ============================ */
+// ============================ §7 流水滚动模块 ============================
+// 设置滚动源文本与小数点 bitmap 复位偏移与完成标志
 static void Scroll_Set(const char *text, uint32_t dp_bitmap)
 {
     strncpy(scroll_buf, text, sizeof(scroll_buf) - 1);
@@ -925,17 +911,10 @@ static void Scroll_Set(const char *text, uint32_t dp_bitmap)
     scroll_completed = false;
 }
 
-/* Render an 8-digit marquee over scroll_buf as a single linear pass (no wrap):
-   the text sweeps fully across the screen and the pass ends the instant the
-   last character has been shown at the far edge — Build_Display then returns to
-   the clock, so the head never re-appears.
-
-   step s = scroll_off runs 0 .. (scroll_len + DISP_LEN - 2). For slot j:
-     FMT_LEFT  : text marches left  (enters at the right, exits at the left),
-                 last char rests at the far LEFT on the final frame.
-     FMT_RIGHT : text marches right (enters at the left, exits at the right),
-                 first char rests at the far RIGHT on the final frame.
-   §3.3 / FAQ Q7: FORMAT selects the direction. */
+/* 以单趟不循环方式渲染流水 文本从屏幕边界扫过 最后一帧停在远端边界即完成。
+   LEFT 方向 文本从右往左走 最后一个字符停在最左侧
+   RIGHT 方向 文本从左往右走 第一个字符停在最右侧
+   步进间隔由 g_scroll_speed 控制 慢速 500ms/步 快速 250ms/步 */
 static void Scroll_Tick(void)
 {
     char win[DISP_LEN + 1];
@@ -944,30 +923,30 @@ static void Scroll_Tick(void)
     uint8_t s_max;
 
     if (scroll_len == 0U) { Display_SetStr("        ", 0); return; }
-    s_max = (uint8_t)(scroll_len + DISP_LEN - 2U);   /* index of the last frame */
+    // 步进范围 文本从右侧进入 8 位数码管 完全扫过后步进停止
+    s_max = (uint8_t)(scroll_len + DISP_LEN - 2U);
 
     if (!scroll_completed && Tick_TimedOut(scroll_last_ms, interval)) {
         scroll_last_ms = g_tick_ms;
         if (scroll_off >= s_max) {
-            scroll_completed = true;   /* §12: last frame has had its full dwell */
+            scroll_completed = true;
         } else {
             scroll_off++;
         }
     }
 
+    // 根据当前步进偏移和方向 计算 8 位窗口中每个位置应显示源文本的哪个字符
     for (j = 0; j < DISP_LEN; j++) {
         int16_t ti;
+        // LEFT 窗口右边缘与步进偏移对齐 RIGHT 左边缘对齐
         if (g_format == FMT_LEFT) {
             ti = (int16_t)scroll_off - (int16_t)(DISP_LEN - 1U) + (int16_t)j;
         } else {
             ti = (int16_t)(scroll_len - 1U) - (int16_t)scroll_off + (int16_t)j;
         }
         if (ti >= 0 && ti < (int16_t)scroll_len) {
-            win[j] = scroll_buf[ti];
-            /* §3.3 dp rule: LEFT (left->right) uses the source char's own dp on
-               this digit (本位); RIGHT (right->left) uses the *next* source
-               char's dp on this digit (下一位), so the separator sits one digit
-               ahead just like the static FMT_RIGHT "提前一位" mirroring. */
+            win[j] = scroll_buf[ti];  // ti 有效 取对应字符
+            // 小数点跟随规则 LEFT 方向用本位小数点 RIGHT 方向用下一位小数点
             if (g_format == FMT_LEFT) {
                 if (scroll_src_dp & (1UL << ti)) dp |= (uint8_t)(1U << j);
             } else {
@@ -984,8 +963,7 @@ static void Scroll_Tick(void)
     Display_SetStr(win, dp);
 }
 
-/* Set the source only when the content changes (preserving the offset across
-   frames), then advance/render. */
+// 仅在内容变化时重置源文本 否则保持偏移并按步进渲染
 static void Scroll_Ensure(const char *text, uint32_t dp_bitmap)
 {
     if (strcmp(text, g_scroll_cur) != 0) {
@@ -1003,7 +981,7 @@ static void Scroll_Reset(void)
     scroll_last_ms = g_tick_ms;
 }
 
-/* ============================ display build ============================ */
+// ============================ 显示内容构建 ============================
 static void Build_Display(void)
 {
     char text[40];
@@ -1011,13 +989,16 @@ static void Build_Display(void)
     uint8_t dp = 0;
     uint8_t i;
 
+    // 显示优先级从高到低 倒计时 > 天气短显 > 消息/流水 > 时钟
     if (g_countdown_active) {
+        // 倒计时进行中 格式 CD MM SS 第 4 位小数点作标志
         uint32_t remain_ms = (g_countdown_end_ms > g_tick_ms) ? (g_countdown_end_ms - g_tick_ms) : 0;
-        uint32_t remain_s = (remain_ms + 999U) / 1000U;
+        uint32_t remain_s = (remain_ms + 999U) / 1000U;  // 向上取整到秒
         snprintf(text, sizeof(text), "CD%02lu%02lu  ",
                  (unsigned long)(remain_s / 60U), (unsigned long)(remain_s % 60U));
         dp = 0x08;
         if (remain_s == 0) {
+            // 倒计时归零 转为蜂鸣器响铃 上报事件
             g_countdown_active = false;
             g_alarm.ringing = 1;
             g_alarm_ring_start_ms = g_tick_ms;
@@ -1025,11 +1006,14 @@ static void Build_Display(void)
             UART_PutString("*EVT:COUNTDOWN_DONE\r\n");
         }
     } else if (g_weather_until_ms > g_tick_ms) {
+        // USER2 触发的天气短显 5 秒窗口
         char wt[9];
         uint8_t wl;
         if (!g_weather_valid) {
+            // 尚无天气数据 显示占位符
             Display_SetStr("--C---  ", 0);
         } else if ((g_tick_ms - g_weather_update_ms) > WEATHER_VALID_MS && !g_blink_on) {
+            // 数据过期 在闪烁的灭半周期全暗以示过期警告
             Display_SetStr("        ", 0);
         } else {
             wl = (uint8_t)strlen(g_weather_text);
@@ -1039,7 +1023,9 @@ static void Build_Display(void)
         }
         return;
     } else if (g_message_until_ms > g_tick_ms && g_message[0]) {
+        // PC 下发的滚动消息 根据长度决定静态还是流水
         if (strlen(g_message) <= 8) {
+            // 短消息静态显示 右填空格
             char mb[9];
             uint8_t ml = (uint8_t)strlen(g_message);
             for (i = 0; i < 8; i++) mb[i] = (i < ml) ? g_message[i] : ' ';
@@ -1047,39 +1033,42 @@ static void Build_Display(void)
             Display_SetStr(mb, (uint8_t)g_message_dp);
         } else {
             Scroll_Ensure(g_message, g_message_dp);
-            /* Return to the clock the instant one full pass completes, so the
-               message never loops into a partial second scroll. */
+            // 完整播放一遍后立即返回时钟 不会出现循环重播
             if (scroll_completed) g_message_until_ms = 0;
         }
         return;
     } else if (g_mode == MODE_NIGHT) {
+        // 夜间模式仅显示时和分 4 位 其余空白
         snprintf(text, sizeof(text), "%02u%02u    ", g_time.h, g_time.mi);
         dp = 0x02;
     } else if (g_edit_state == ST_EDIT_DATE) {
+        // 编辑日期态 显示编辑值 yy.mm.dd
         snprintf(text, sizeof(text), "%02u%02u%02u  ",
                  (uint8_t)(g_edit_date.y % 100U), g_edit_date.m, g_edit_date.d);
         dp = 0x0a;
     } else if (g_edit_state == ST_IDLE && g_display_mode == DISP_DATE) {
+        // 时钟显示态 日期模式 yy.mm.dd
         snprintf(text, sizeof(text), "%02u%02u%02u  ",
                  (uint8_t)(g_date.y % 100U), g_date.m, g_date.d);
         dp = 0x0a;
     } else if (g_edit_state == ST_IDLE && g_display_mode == DISP_YEAR) {
-        /* Full year date YYYY.MMDD: 8 digits fill the display exactly, so it is
-           shown statically (FAQ Q7: 8 digits never scroll). Single dot after the
-           year only (idx3), per the YYYY.MMDD format (FAQ Q12). */
+        // YYYY.MMDD 格式恰好 8 位 静态显示无需滚动 小数点仅在年份后第 3 位
         char yd[9];
         snprintf(yd, sizeof(yd), "%04u%02u%02u", g_date.y, g_date.m, g_date.d);
         Display_SetStr(yd, (uint8_t)(1U << 3));
         return;
     } else if (g_edit_state == ST_EDIT_ALARM) {
+        // 编辑闹钟态 显示编辑值 hh.mm.ss 末尾 A 表示闹钟
         snprintf(text, sizeof(text), "%02u%02u%02u A",
                  g_edit_alarm.t.h, g_edit_alarm.t.mi, g_edit_alarm.t.s);
         dp = 0x0a;
     } else if (g_edit_state == ST_EDIT_TIME) {
+        // 编辑时间态 显示编辑值 hh.mm.ss
         snprintf(text, sizeof(text), "%02u%02u%02u  ",
                  g_edit_time.h, g_edit_time.mi, g_edit_time.s);
         dp = 0x0a;
     } else {
+        // 默认 时钟走时态 显示当前时间 hh.mm.ss
         snprintf(text, sizeof(text), "%02u%02u%02u  ", g_time.h, g_time.mi, g_time.s);
         dp = 0x0a;
     }
@@ -1087,10 +1076,8 @@ static void Build_Display(void)
     for (i = 0; i < 8; i++) base[i] = text[i] ? text[i] : ' ';
     base[8] = '\0';
 
-    /* Blank the highlighted edit field BEFORE any FORMAT reversal, using the
-       logical (LEFT) digit positions. This way the blanked pair is mirrored
-       together with the value digits below, so in RIGHT mode the highlight
-       lands on the same field's reversed digits instead of the left edge. */
+    /* 编辑态闪烁时先按逻辑 LEFT 位置抹除高亮字段 再做 FORMAT 镜像反转。
+       这样可以保证 RIGHT 模式下高亮位置也与反转后的值对齐 不会错位 */
     if (g_edit_state != ST_IDLE && !g_blink_on) {
         uint8_t start = 0;
         if (g_edit_field == 1) start = 2;
@@ -1100,11 +1087,8 @@ static void Build_Display(void)
     }
 
     if (g_format == FMT_RIGHT) {
-        /* §3.3 / FAQ Q10: RIGHT mirrors the full 8-digit field, so the value
-           moves to the right side (e.g. "123045  " -> "  540321"). A dot that
-           sat to the right of digit p (LEFT) must move to digit (6-p) so the
-           separators stay between the same number pairs ("提前一位"):
-           dp 0x0A (bits 1,3) -> 0x28 (bits 5,3). */
+        /* RIGHT 模式将 8 位整体镜像反转 小数点也需跟随逆序到对称位置。
+           例 dp 0x0A = bit1+bit3 反转后 dp 0x28 = bit5+bit3 分隔符保持在相同数字对之间 */
         char rev[9];
         uint8_t rdp = 0;
         for (i = 0; i < 8; i++) {
@@ -1125,8 +1109,7 @@ static void Send_Display_Event(void)
 {
     char enc[9];
     uint8_t i;
-    /* §16: fixed 8 chars, pad with spaces (no dp here), then a space and the
-       2-digit dp bitmap in hex, rebuilt from the per-digit disp_dp[] array. */
+    // 构建 *EVT:DISP 报文 8 字符定长 空格填充 后跟空格和 2 位十六进制 dp bitmap
     for (i = 0; i < 8; i++) {
         char c = (char)disp_buf[i];
         enc[i] = (c == '\0') ? ' ' : c;
@@ -1137,8 +1120,7 @@ static void Send_Display_Event(void)
 
 static void Send_LED_Event(void)
 {
-    /* Gate this one TX so reporting the RXTX bit doesn't itself re-arm the
-       RXTX activity window (would self-oscillate). */
+    // 门控 本次 TX 不触发串口活动指示灯 避免自激振荡
     g_tx_is_led_evt = true;
     UART_Printf("*EVT:LED %02X\r\n", g_led_byte);
     g_tx_is_led_evt = false;
@@ -1151,7 +1133,7 @@ static void Send_Key_Event(key_code_t key)
     }
 }
 
-/* ============================ §3 key scan / events ============================ */
+// ============================ §3 按键扫描与事件队列 ============================
 static void Key_Push(key_code_t c, key_event_t e)
 {
     uint8_t next = (uint8_t)((g_evq_head + 1U) % KEY_EVQ_SIZE);
@@ -1172,18 +1154,21 @@ static key_event_t Key_GetEvent(key_code_t *out)
     return e;
 }
 
-/* §3: sample keys (TCA bits from the ISR + USER1/2 GPIO), debounce, run a small
-   per-key state machine and push DOWN/UP/LONG/REPEAT events into the queue. */
+/* 从定时器 ISR 读取 TCA 按键电平 加上 GPIO 读取 USER1/USER2
+   经过软件去抖后 运行逐键状态机 将 DOWN/UP/LONG/REPEAT 事件写入队列 */
 static void Key_Scan(void)
 {
+    // 从定时器 ISR 采样的 TCA 原始电平读取 8 个 I2C 按键
     uint16_t raw = g_tca_key_raw;
     uint32_t pj;
     uint8_t b;
 
+    // USER1 和 USER2 是独立 GPIO 输入 低电平按下 补充进 raw
     pj = GPIOPinRead(GPIO_PORTJ_BASE, GPIO_PIN_0 | GPIO_PIN_1);
     if ((pj & GPIO_PIN_0) == 0) raw |= (1U << (KEY_USER1 - 1));
     if ((pj & GPIO_PIN_1) == 0) raw |= (1U << (KEY_USER2 - 1));
 
+    // 软件去抖 连续采样若干次稳定后才视为有效
     if (raw == g_key_last_raw) {
         if (g_key_same_count < 3) g_key_same_count++;
     } else {
@@ -1191,28 +1176,31 @@ static void Key_Scan(void)
         g_key_last_raw = raw;
     }
 
+    // 去抖通过后 检测上升沿/下降沿 推入事件队列
     if (g_key_same_count >= KEY_DEBOUNCE_COUNT) {
         uint16_t prev = g_key_stable;
-        uint16_t pressed = (uint16_t)(raw & ~prev);
-        uint16_t released = (uint16_t)(~raw & prev);
+        uint16_t pressed = (uint16_t)(raw & ~prev);      // 新按下的位
+        uint16_t released = (uint16_t)(~raw & prev);     // 新释放的位
         g_key_stable = raw;
 
         for (b = 0; b < KEY_COUNT; b++) {
             key_code_t code = (key_code_t)(b + 1);
             if (pressed & (1U << b)) {
+                // 按下 进入 PRESSED 状态 记录时间戳
                 g_key_fsm[b] = 1;
                 g_key_press_ms[b] = g_tick_ms;
                 g_key_repeat_ms[b] = g_tick_ms;
                 Key_Push(code, KEV_DOWN);
             }
             if (released & (1U << b)) {
+                // 释放 回到 IDLE 状态
                 g_key_fsm[b] = 0;
                 Key_Push(code, KEV_UP);
             }
         }
     }
 
-    /* Long-press + auto-repeat are time-driven, independent of edge detection. */
+    // 长按与连发由时间驱动 与边沿检测独立
     for (b = 0; b < KEY_COUNT; b++) {
         key_code_t code = (key_code_t)(b + 1);
         if (g_key_fsm[b] == 0) continue;
@@ -1229,12 +1217,12 @@ static void Key_Scan(void)
     }
 }
 
-/* Translate a key event into the documented behavior. FUNC and USER1 defer
-   their action to UP/LONG so a long press can override the short action. */
+/* 将按键事件分发到 Handle_Key 执行对应功能。
+   FUNC 和 USER1 采用延迟判断 按下时暂存 等抬起或长按后再决定短按/长按动作 */
 static void Dispatch_Key(key_event_t ev, key_code_t code)
 {
     if (ev == KEV_DOWN && g_message_until_ms > g_tick_ms && code >= KEY_DISP) {
-        g_message_until_ms = 0;   /* §12: any non-edit key interrupts a message */
+        g_message_until_ms = 0;   // 任意非编辑键打断消息显示
     }
 
     switch (code) {
@@ -1242,13 +1230,13 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
             if (ev == KEV_DOWN) {
                 Send_Key_Event(KEY_FUNC);
                 if (g_alarm.ringing) {
-                    Handle_Key(KEY_FUNC);     /* §8: FUNC stops the alarm immediately */
+                    Handle_Key(KEY_FUNC);     // 响铃中 FUNC 立即止铃
                     g_func_armed = false;
                 } else if (g_edit_state == ST_IDLE) {
-                    Handle_Key(KEY_FUNC);     /* enter edit on press */
+                    Handle_Key(KEY_FUNC);     // 空闲态短按即进入编辑
                     g_func_armed = false;
                 } else {
-                    g_func_armed = true;      /* in edit: defer to UP (cycle) / LONG (save) */
+                    g_func_armed = true;      // 编辑中暂缓 等抬起循环 / 长按保存
                 }
             } else if (ev == KEV_LONG) {
                 if (g_func_armed) {
@@ -1257,7 +1245,7 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 }
             } else if (ev == KEV_UP) {
                 if (g_func_armed) {
-                    Handle_Key(KEY_FUNC);     /* short press: cycle edit field/state */
+                    Handle_Key(KEY_FUNC);     // 短按 循环切换编辑字段或状态
                     g_func_armed = false;
                 }
             }
@@ -1267,12 +1255,12 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 g_user1_armed = true;
             } else if (ev == KEV_LONG) {
                 if (g_user1_armed) {
-                    Show_Ntp_Status();        /* §17: long press shows NTP status */
+                    Show_Ntp_Status();        // 长按显示 NTP 同步状态
                     g_user1_armed = false;
                 }
             } else if (ev == KEV_UP) {
                 if (g_user1_armed) {
-                    Send_Key_Event(KEY_USER1); /* short press: report (PC auto-NTP) */
+                    Send_Key_Event(KEY_USER1); // 短按上报事件 PC 收到后自动触发 NTP 对时
                     g_user1_armed = false;
                 }
             }
@@ -1296,8 +1284,10 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
 
 static void Handle_Key(key_code_t key)
 {
+    // 每次按键操作刷新编辑超时计时
     g_edit_last_ms = g_tick_ms;
 
+    // 响铃中 FUNC 无条件止铃 优先级最高
     if (g_alarm.ringing && key == KEY_FUNC) {
         g_alarm.ringing = 0;
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
@@ -1307,7 +1297,9 @@ static void Handle_Key(key_code_t key)
 
     switch (key) {
         case KEY_FUNC:
+            // FUNC 循环切换编辑状态 空闲→编辑日期→编辑时间→编辑闹钟→空闲
             if (g_edit_state == ST_IDLE) {
+                // 进入编辑前快照当前值 放弃时回退
                 g_edit_date = g_date;
                 g_edit_time = g_time;
                 g_edit_alarm = g_alarm;
@@ -1324,19 +1316,21 @@ static void Handle_Key(key_code_t key)
             g_edit_field = 0;
             break;
         case KEY_SHIFT:
-            /* §9: SHIFT moves the highlighted field to the left. */
+            // 编辑态下 SHIFT 循环左移高亮字段
             if (g_edit_state != ST_IDLE) g_edit_field = (uint8_t)((g_edit_field + 2U) % 3U);
             break;
         case KEY_ADD:
+            // ADD 根据当前编辑状态和目标字段 +1 含进位与范围钳制
             if (g_edit_state == ST_EDIT_DATE) {
                 if (g_edit_field == 0) {
                     g_edit_date.y++;
+                    // 年份递增后检查日期是否溢出当月 如闰年 2.29→3.1 在正常化中也会处理
                     if (g_edit_date.d > Days_In_Month(g_edit_date.y, g_edit_date.m)) {
                         g_edit_date.d = Days_In_Month(g_edit_date.y, g_edit_date.m);
                     }
                 } else if (g_edit_field == 1) {
                     g_edit_date.m++;
-                    if (g_edit_date.m > 12) g_edit_date.m = 1;
+                    if (g_edit_date.m > 12) g_edit_date.m = 1;  // 月溢出回绕
                     if (g_edit_date.d > Days_In_Month(g_edit_date.y, g_edit_date.m)) {
                         g_edit_date.d = Days_In_Month(g_edit_date.y, g_edit_date.m);
                     }
@@ -1345,6 +1339,7 @@ static void Handle_Key(key_code_t key)
                     if (g_edit_date.d > Days_In_Month(g_edit_date.y, g_edit_date.m)) g_edit_date.d = 1;
                 }
             } else if (g_edit_state == ST_EDIT_TIME) {
+                // 时/分/秒各自回绕
                 if (g_edit_field == 0) g_edit_time.h = (uint8_t)((g_edit_time.h + 1U) % 24U);
                 else if (g_edit_field == 1) g_edit_time.mi = (uint8_t)((g_edit_time.mi + 1U) % 60U);
                 else g_edit_time.s = (uint8_t)((g_edit_time.s + 1U) % 60U);
@@ -1352,10 +1347,11 @@ static void Handle_Key(key_code_t key)
                 if (g_edit_field == 0) g_edit_alarm.t.h = (uint8_t)((g_edit_alarm.t.h + 1U) % 24U);
                 else if (g_edit_field == 1) g_edit_alarm.t.mi = (uint8_t)((g_edit_alarm.t.mi + 1U) % 60U);
                 else g_edit_alarm.t.s = (uint8_t)((g_edit_alarm.t.s + 1U) % 60U);
-                g_edit_alarm.enabled = 1;
+                g_edit_alarm.enabled = 1;  // 编辑闹钟后自动使能
             }
             break;
         case KEY_SAVE:
+            // 编辑值写入运行态 上报 *EVT:EDIT 事件
             if (g_edit_state == ST_EDIT_DATE) {
                 g_date.y = g_edit_date.y;
                 g_date.m = g_edit_date.m;
@@ -1383,10 +1379,10 @@ static void Handle_Key(key_code_t key)
             g_format = (g_format == FMT_LEFT) ? FMT_RIGHT : FMT_LEFT;
             break;
         case KEY_USER1:
-            /* Reached only via *SET:KEY USER1 (PC virtual long-press). A
-               physical USER1 short press emits *EVT:KEY USER1 instead and
-               never lands here; a physical long press calls Show_Ntp_Status
-               directly. So mirror the long-press behavior: show NTP status. */
+            /* 仅通过 *SET:KEY USER1 到达 PC 虚拟长按。
+               物理短按上报 *EVT:KEY USER1 不经过此处
+               物理长按直接调用 Show_Ntp_Status 也不经过此分支。
+               所以此分支对应虚拟长按行为 显示 NTP 同步状态 */
             Show_Ntp_Status();
             break;
         case KEY_USER2:
@@ -1398,7 +1394,7 @@ static void Handle_Key(key_code_t key)
     }
 }
 
-/* ============================ §6 time / §8 alarm ============================ */
+// ============================ §6 时间走时 / §8 闹钟逻辑 ============================
 static void Time_Tick_1s(void)
 {
     g_time.s++;
@@ -1417,16 +1413,14 @@ static void Time_Tick_1s(void)
     }
 
     if (g_edit_state != ST_IDLE && Tick_TimedOut(g_edit_last_ms, 5000U)) {
-        g_edit_state = ST_IDLE;   /* §9: 5 s no-op exits without saving */
+        g_edit_state = ST_IDLE;   // 5 秒无操作自动退出编辑 不保存
     }
 
     if (g_alarm.enabled && !g_alarm.ringing &&
         g_time.h == g_alarm.t.h && g_time.mi == g_alarm.t.mi && g_time.s == g_alarm.t.s) {
         g_alarm.ringing = 1;
         g_alarm_ring_start_ms = g_tick_ms;
-        /* §8: base ring auto-stops at 8.7s so that the §15 rain/snow bonus
-           (+3 beeps = 3 cycles x 200ms on + 200ms off = 1200ms) keeps the
-           total within the <=10s limit (8800 + 1200 = 10000ms). */
+        // 基础响铃 8.8 秒自动停止 雨雪天气追加 3 声共 1200ms 总计不超 10 秒
         g_ring_limit_ms = 8800;
         if (g_weather_valid &&
             (g_weather_code == WEATHER_RAI || g_weather_code == WEATHER_SNO)) {
@@ -1441,42 +1435,45 @@ static void Time_Tick_1s(void)
 
 static void Update_Status_LED(void)
 {
-    /* §11: LED0 = 1 Hz system heartbeat (500 ms on / 500 ms off). Kept as the
-       base in every mode, so night mode below naturally retains only the
-       heartbeat, and *SET:LED override (g_led_override) stops it. */
+    /* LED0 为 1Hz 系统心跳 500ms 亮 / 500ms 灭 作为所有模式下的基准位。
+       夜间模式只保留心跳 *SET:LED 接管后心跳也被暂停 */
     uint8_t led = (((g_tick_ms / 500U) & 1U) == 0U) ? 0x01U : 0x00U;
+    // 快速闪烁 200ms 周期 用于闹钟响铃指示
     bool fast = (((g_tick_ms / 200U) & 1U) == 0U);
+    // 慢速闪烁 500ms 周期 用于雨雪/高温/NTP 漂移等扩展指示
     bool slow = (((g_tick_ms / 500U) & 1U) == 0U);
 
-    /* FAQ Q11 (bonus): if no *SET:LED arrives for 10s, auto-release the takeover
-       and let the LED meanings resume. */
+    // 10 秒内未收到新的 *SET:LED 自动退出接管模式 恢复 LED 原有含义
     if (g_led_override && Tick_TimedOut(g_led_override_ms, 10000U)) {
         g_led_override = false;
     }
 
+    // 夜间模式只保留心跳 LED0 其余全灭
     if (g_mode != MODE_NIGHT) {
+        // LED1 闹钟使能常亮 / 响铃时快闪
         if (g_alarm.ringing) {
             if (fast) led |= 0x02;
         } else if (g_alarm.enabled) {
             led |= 0x02;
         }
+        // LED2 编辑模式常亮
         if (g_edit_state != ST_IDLE) led |= 0x04;
+        // LED3 串口收发活动 收发后亮约 100ms
         if (g_serial_activity_until_ms > g_tick_ms) led |= 0x08;
+        // 扩展指示 LED4-7 仅在天气/对时有效
         if (g_weather_valid) {
-            if (g_weather_code == WEATHER_SUN) led |= 0x10;
-            if ((g_weather_code == WEATHER_RAI || g_weather_code == WEATHER_SNO) && slow) led |= 0x20;
-            if (g_weather_temp >= 30) led |= 0x40;
+            if (g_weather_code == WEATHER_SUN) led |= 0x10;               // LED4 晴 常亮
+            if ((g_weather_code == WEATHER_RAI || g_weather_code == WEATHER_SNO) && slow) led |= 0x20;  // LED5 雨雪 慢闪
+            if (g_weather_temp >= 30) led |= 0x40;                         // LED6 高温 常亮
         }
         if (g_ntp_synced) {
             if ((g_tick_ms - g_ntp_last_sync_ms) > 86400000UL) {
-                if (slow) led |= 0x80;
+                if (slow) led |= 0x80;  // 超过 24h 未同步 LED7 慢闪
             } else {
-                led |= 0x80;
+                led |= 0x80;            // 已同步 LED7 常亮
             }
         }
-        /* §15 weather linkage: while the alarm rings in high temperature
-           (>=30C), all 8 LEDs slow-blink together as an extra alert. This
-           overrides the normal indicators only for the duration of the ring. */
+        // 高温 >=30°C 且闹钟响铃时 8 位 LED 整体慢闪 覆盖原有指示 仅响铃期间有效
         if (g_alarm.ringing && g_weather_valid && g_weather_temp >= 30) {
             led = slow ? 0xFFU : 0x00U;
         }
@@ -1489,8 +1486,7 @@ static void Update_Status_LED(void)
 
 static void Show_Ntp_Status(void)
 {
-    /* FAQ Q13: short display "n SY xx", n = hours since last sync (0-9, clamped),
-       xx = OK (SYNCED) / DR (DRIFT) / NO (UNSYNCED, n blanked). */
+    // 短显 NTP 同步状态 "n SY xx" n=距上次同步小时数 0-9 钳位 xx=OK/DR/NO
     if (g_ntp_synced) {
         uint32_t hours = (g_tick_ms - g_ntp_last_sync_ms) / 3600000UL;
         const char *code = ((g_tick_ms - g_ntp_last_sync_ms) > 86400000UL) ? "DR" : "OK";
@@ -1499,7 +1495,7 @@ static void Show_Ntp_Status(void)
     } else {
         snprintf(g_message, sizeof(g_message), " SYNO");
     }
-    /* "n. SY. xx": dot after n (digit 0) and after SY (digit 2). */
+    // 小数点位于 n 后第 0 位和 SY 后第 2 位
     g_message_dp = (uint8_t)((1U << 0) | (1U << 2));
     g_message_until_ms = g_tick_ms + 3000U;
     Scroll_Reset();
@@ -1508,16 +1504,19 @@ static void Show_Ntp_Status(void)
 static void Alarm_Service(void)
 {
     if (!g_alarm.ringing) return;
+    // 超时自动止铃
     if (Tick_TimedOut(g_alarm_ring_start_ms, g_ring_limit_ms)) {
         g_alarm.ringing = 0;
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         UART_PutString("*EVT:ALARM_OFF\r\n");
         return;
     }
+    // 夜间模式抑制蜂鸣器 闹钟不响
     if (g_mode == MODE_NIGHT) {
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         return;
     }
+    // 200ms 周期翻转蜂鸣器 200ms 响 / 200ms 停 节奏式响铃
     if ((g_tick_ms - g_alarm_last_beep_ms) >= 200U) {
         g_alarm_last_beep_ms = g_tick_ms;
         g_alarm_beep_on = !g_alarm_beep_on;
@@ -1534,7 +1533,7 @@ static uint8_t Days_In_Month(uint16_t year, uint8_t month)
     return 31U;
 }
 
-/* §6: weekday via Zeller's congruence (0 = Sunday .. 6 = Saturday). */
+// 蔡勒公式计算星期 0 = 周日 6 = 周六
 static void Calc_Wday(date_t *d)
 {
     uint16_t y = d->y;
@@ -1547,6 +1546,7 @@ static void Calc_Wday(date_t *d)
     d->wday = (uint8_t)((h + 6U) % 7U);
 }
 
+// 日期规范化 处理月份溢出与月末进位 自动修正星期
 static void Normalize_Date(void)
 {
     if (g_date.m < 1) g_date.m = 1;
@@ -1559,8 +1559,7 @@ static void Normalize_Date(void)
     Calc_Wday(&g_date);
 }
 
-/* Build an 8-bit LED mask mirroring which of the 8 digits are lit:
-   bit i (LED i+1) is set when digit i shows a non-blank character. */
+// 构建 8 位 LED 掩码 LED i+1 点亮当且仅当数码管第 i 位显示非空字符
 static uint8_t Startup_Led_Mask(const char *s)
 {
     uint8_t m = 0, i;
@@ -1572,22 +1571,17 @@ static uint8_t Startup_Led_Mask(const char *s)
 
 static void Startup_Show(void)
 {
-    /* §5 power-on sequence: every frame 800-1000ms, total within 4-8s,
-       with at least one blink per stage. The timer ISR keeps the display
-       scanned; here we just stage the frames. Total = 5.6s. */
+    /* 开机画面 每阶段 800-1000ms 总时长 4-8s 每阶段至少闪烁一次 总计约 5.6s。
+       每阶段 LED 与数码管同位同步亮灭 空位对应的 LED 保持熄灭 */
     uint32_t t;
 
-    /* Throughout the splash, each LED mirrors the digit at the same position:
-       LED i lights when digit i is lit, and blinks off together with it. The
-       remaining (blank) digits keep their LEDs off. */
-
-    /* 1) all 8 digits + 8 LEDs on, then off -> one blink. */
+    // 阶段 1 全亮 88888888 + LED 全亮 -> 全灭
     Display_SetStr("88888888", 0xff); Set_LED(Startup_Led_Mask("88888888"));
     t = g_tick_ms; while (!Tick_TimedOut(t, 900U));
     Display_SetStr("        ", 0x00); Set_LED(0x00);
     t = g_tick_ms; while (!Tick_TimedOut(t, 900U));
 
-    /* 2) last 8 digits of the student id, blink once. */
+    // 阶段 2 学号后 8 位闪烁一次
     Display_SetStr("42910013", 0x00); Set_LED(Startup_Led_Mask("42910013"));
     t = g_tick_ms; while (!Tick_TimedOut(t, 900U));
     Display_SetStr("        ", 0x00); Set_LED(0x00);
@@ -1595,7 +1589,7 @@ static void Startup_Show(void)
     Display_SetStr("42910013", 0x00); Set_LED(Startup_Led_Mask("42910013"));
     t = g_tick_ms; while (!Tick_TimedOut(t, 300U));
 
-    /* 3) name pinyin, blink once. */
+    // 阶段 3 姓名拼音闪烁一次
     Display_SetStr("YANZUO  ", 0x00); Set_LED(Startup_Led_Mask("YANZUO  "));
     t = g_tick_ms; while (!Tick_TimedOut(t, 900U));
     Display_SetStr("        ", 0x00); Set_LED(0x00);
@@ -1603,7 +1597,7 @@ static void Startup_Show(void)
     Display_SetStr("YANZUO  ", 0x00); Set_LED(Startup_Led_Mask("YANZUO  "));
     t = g_tick_ms; while (!Tick_TimedOut(t, 300U));
 
-    /* 4) version v1.0 held for 1s (dp after the '1'). */
+    // 阶段 4 版本号 v1.0 保持 1s 小数点在第 1 位后
     Display_SetStr("V10     ", 0x02); Set_LED(Startup_Led_Mask("V10     "));
     t = g_tick_ms; while (!Tick_TimedOut(t, 1000U));
 }
@@ -1615,13 +1609,19 @@ static void Upper_Copy(char *dst, const char *src, uint16_t max)
     dst[i] = '\0';
 }
 
+/* 缩写匹配 algorithm 把 token 和 pattern 都转为大写后比对。
+   pattern 中大写字母为必输部分 小写字母可省略。
+   如 pattern = "MINute" 则 "MIN"/"MINU"/"MINUT"/"MINUTE" 均合法
+   但 "MI" 不合法 因为大写 N 未输入 */
 static bool Token_Matches(const char *token, const char *pattern)
 {
     char t[24], p[24];
     uint8_t req = 0, i;
     Upper_Copy(t, token, sizeof(t));
     Upper_Copy(p, pattern, sizeof(p));
+    // 统计 pattern 中大写字母数量 即最少必输字符数
     for (i = 0; pattern[i]; i++) if (isupper((unsigned char)pattern[i])) req++;
+    // token 长度必须 >= 必输字符数 <= 完整 pattern 长度
     if (strlen(t) < req || strlen(t) > strlen(p)) return false;
     return strncmp(p, t, strlen(t)) == 0;
 }
@@ -1646,6 +1646,7 @@ static bool Parse_U16(const char *s, uint16_t *out)
     return true;
 }
 
+// GET 应答通过此函数输出 自动处理 RIGHT 模式的字符串逆序
 static void Send_OK_Value(const char *value)
 {
     char out[32];
@@ -1654,6 +1655,7 @@ static void Send_OK_Value(const char *value)
         UART_Printf("OK %s\r\n", value);
         return;
     }
+    // RIGHT 模式下逐字符逆序
     for (i = 0; i < len; i++) out[i] = value[len - 1U - i];
     out[len] = '\0';
     UART_Printf("OK %s\r\n", out);
@@ -1661,12 +1663,13 @@ static void Send_OK_Value(const char *value)
 
 static void Process_Command(char *line)
 {
-    static char work[96];  /* static to avoid stack allocation */
+    static char work[96];  // 静态分配 避免栈上临时分配
     char *argv[14];
     uint8_t argc = 0;
     char *tok;
     uint8_t i;
 
+    // 统一转为大写后按空格/Tab 分割为 token 数组
     Upper_Copy(work, line, sizeof(work));
     tok = strtok(work, " \t");
     while (tok && argc < 14) {
@@ -1675,11 +1678,13 @@ static void Process_Command(char *line)
     }
     if (argc == 0) return;
 
+    // ---- *PING 心跳应答 ----
     if (Token_Matches(argv[0], "*PING")) {
         UART_Printf("*PONG %lu\r\n", (unsigned long)(g_tick_ms / 1000U));
         return;
     }
 
+    // ---- *RST 复位 恢复出厂默认值 ----
     if (Token_Matches(argv[0], "*RST")) {
         g_date.y = 2026; g_date.m = 6; g_date.d = 1;
         g_time.h = 0; g_time.mi = 0; g_time.s = 0;
@@ -1691,11 +1696,12 @@ static void Process_Command(char *line)
         g_ntp_synced = false;
         g_message_until_ms = 0;
         g_weather_until_ms = 0;
-        Update_Status_LED();
+        Update_Status_LED();  // 恢复后重新计算 LED 状态
         UART_PutString("OK\r\n");
         return;
     }
 
+    // ---- *NTP SYNC 标记对时完成 ----
     if (Token_Matches(argv[0], "*NTP")) {
         if (argc < 2 || !Token_Matches(argv[1], "SYNC")) {
             UART_PutString("ERROR SYNTAX\r\n");
@@ -1708,16 +1714,14 @@ static void Process_Command(char *line)
         return;
     }
 
-    /* GET: accept both "*GET DATE" (space) and "*GET:DATE" (colon) forms.
-       argv[] is already upper-cased, so a colon-form sub-command is simply
-       the substring after "*GET:". */
+    // 同时支持空格形式和冒号形式的 GET 命令 "*GET DATE" 和 "*GET:DATE"
     if (Token_Matches(argv[0], "*GET") || strncmp(argv[0], "*GET:", 5) == 0) {
         char value[24];
         const char *sub;
         if (strncmp(argv[0], "*GET:", 5) == 0 && argv[0][5] != '\0') {
-            sub = argv[0] + 5;                 /* "*GET:DATE" form */
+            sub = argv[0] + 5;                 // 冒号形式 子命令紧跟在 *GET: 后面
         } else {
-            /* "*GET DATE" or "*GET: DATE" (space after colon): sub is argv[1]. */
+            // 空格形式 子命令为下一个 token
             if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
             sub = argv[1];
         }
@@ -1736,11 +1740,12 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:KEY 模拟物理按键 不回报 *EVT:KEY 防环回 ----
     if (Token_Matches(argv[0], "*SET:KEY")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         for (i = 1; i <= KEY_COUNT; i++) {
             if (Token_Matches(argv[1], KEY_NAMES[i])) {
-                Handle_Key((key_code_t)i);   /* §10: *SET:KEY does NOT emit *EVT:KEY */
+                Handle_Key((key_code_t)i);   // *SET:KEY 直接执行动作不回报 *EVT:KEY 防环回
                 UART_PutString("OK\r\n");
                 return;
             }
@@ -1749,6 +1754,7 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:DISPLAY 数码管整屏开关 ----
     if (Token_Matches(argv[0], "*SET:DISPlay")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "ON")) disp_on = 1;
@@ -1758,6 +1764,7 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:FORMAT 显示方向 LEFT/RIGHT ----
     if (Token_Matches(argv[0], "*SET:FORMAT")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "LEFT")) g_format = FMT_LEFT;
@@ -1767,6 +1774,7 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:MODE 昼夜模式切换 切换后上报 *EVT:MODE ----
     if (Token_Matches(argv[0], "*SET:MODE")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "DAY")) g_mode = MODE_DAY;
@@ -1776,17 +1784,18 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:LED 远程直控 LED 00 退出接管 非00 进入接管 ----
     if (Token_Matches(argv[0], "*SET:LED")) {
         unsigned int val;
         if (argc < 2 || sscanf(argv[1], "%x", &val) != 1 || val > 0xff) {
             UART_PutString("ERROR PARAM\r\n"); return;
         }
         if (val == 0U) {
-            g_led_override = false;
-            Update_Status_LED();
+            g_led_override = false;       // 00 退出接管
+            Update_Status_LED();          // 立即恢复正常 LED 含义
         } else {
             g_led_override = true;
-            g_led_override_ms = g_tick_ms;   /* arm the 10s auto-release window */
+            g_led_override_ms = g_tick_ms;   // 启动 10s 自动退出接管计时
             Set_LED((uint8_t)val);
         }
         UART_PutString("OK\r\n");
@@ -1794,6 +1803,7 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:BEEP 远程蜂鸣 借闹钟机制实现 范围 10-5000ms ----
     if (Token_Matches(argv[0], "*SET:BEEP")) {
         uint16_t ms;
         if (argc < 2 || !Parse_U16(argv[1], &ms) || ms < 10 || ms > 5000) {
@@ -1806,20 +1816,21 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:MSG 滚动消息 ≤32 字节 保留原大小写 ----
     if (Token_Matches(argv[0], "*SET:MSG")) {
+        // 从原始 line 中取消息文本 避免 toupper 破坏大小写
         const char *raw = strchr(line, ' ');
         uint8_t rlen = 0, len = 0;
         if (!raw) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         while (*raw == ' ' || *raw == '\t') raw++;
         while (raw[rlen] && raw[rlen] != '\r' && raw[rlen] != '\n' && rlen < 32) rlen++;
-        /* §12: message must be <= 32 bytes; reject anything longer. */
+        // 消息长度不可超过 32 字节
         if (raw[rlen] && raw[rlen] != '\r' && raw[rlen] != '\n') {
             UART_PutString("ERROR RANGE\r\n"); return;
         }
-        /* §3.3: an embedded '.' is the decimal point of the character before it
-           (e.g. "8.8" = two digits with a dp after the first). Strip the dots
-           into g_message_dp (one bit per visible character) so the marquee can
-           render them. A leading dot with no preceding char is dropped. */
+        /* 解析内嵌小数点 每个 '.' 是它前面那个字符的小数点。
+           将 '.' 剥离存入 g_message_dp bitmap 流水渲染时按位点亮。
+           开头孤立的小数点无前导字符则丢弃 */
         g_message_dp = 0;
         {
             uint8_t i;
@@ -1832,11 +1843,8 @@ static void Process_Command(char *line)
             }
         }
         g_message[len] = '\0';
-        /* <=8: static for 3s. >8: a generous safety cap; the actual return to
-           the clock is driven by scroll_completed after exactly one full pass
-           (Build_Display), so this only bounds the window if scrolling stalls.
-           Uses the slow step (500ms) + margin so it never cuts a pass short at
-           either speed. */
+        /* 短消息 <=8 位静态显示 3s 长消息由 scroll_completed 驱动整趟播完后返回
+           这里的超时仅作安全兜底 取慢速步进 + 余量 确保不会中途截断流水 */
         g_message_until_ms = g_tick_ms + (len <= 8U ? 3000U :
                               ((uint32_t)(len + 8U) * 500U + 2000U));
         Scroll_Reset();
@@ -1844,6 +1852,7 @@ static void Process_Command(char *line)
         return;
     }
 
+    // ---- *SET:WEA 天气数据下发 温度 -40~+50 天气码 6 种 ----
     if (Token_Matches(argv[0], "*SET:WEA")) {
         static const char *cond_names[] = {"SUN", "CLD", "OVC", "RAI", "SNO", "FOG"};
         char cond[8];
@@ -1857,6 +1866,7 @@ static void Process_Command(char *line)
         if (temp < -40 || temp > 50) { UART_PutString("ERROR RANGE\r\n"); return; }
         Upper_Copy(cond, argv[2], sizeof(cond));
 
+        // 天气描述映射到内部编码
         if (Token_Matches(cond, "SUN")) code = WEATHER_SUN;
         else if (Token_Matches(cond, "CLD")) code = WEATHER_CLD;
         else if (Token_Matches(cond, "OVC")) code = WEATHER_OVC;
@@ -1869,11 +1879,13 @@ static void Process_Command(char *line)
         g_weather_code = code;
         g_weather_valid = true;
         g_weather_update_ms = g_tick_ms;
+        // 构建短显文本 如 "25CSUN"
         snprintf(g_weather_text, sizeof(g_weather_text), "%ldC%s", temp, cond_names[code]);
         UART_PutString("OK\r\n");
         return;
     }
 
+    // ---- *SET:COUNTDOWN 专注倒计时 1-3599 秒 自主增加功能 ----
     if (Token_Matches(argv[0], "*SET:COUNTDOWN")) {
         uint16_t sec;
         if (argc < 2 || !Parse_U16(argv[1], &sec) || sec == 0 || sec > 3599) {
@@ -1888,7 +1900,9 @@ static void Process_Command(char *line)
     if (Token_Matches(argv[0], "*SET:DATE") || Token_Matches(argv[0], "*SET:TIME") || Token_Matches(argv[0], "*SET:ALARM")) {
         bool is_date = Token_Matches(argv[0], "*SET:DATE");
         bool is_time = Token_Matches(argv[0], "*SET:TIME");
+        // 编辑态下拒绝外部写入 防止 PC 覆盖正在编辑的值
         if (g_edit_state != ST_IDLE) { UART_PutString("ERROR BUSY\r\n"); return; }
+        // *SET:ALARM OFF 关闭闹钟并停止响铃
         if (!is_date && !is_time && argc == 2 && Token_Matches(argv[1], "OFF")) {
             g_alarm.enabled = 0;
             g_alarm.ringing = 0;
@@ -1899,6 +1913,7 @@ static void Process_Command(char *line)
             return;
         }
         {
+            // 解析参数 先扫描字段名 token 直到遇到非字段名 token 即值开始
             uint8_t field_count = 0;
             uint8_t value_start;
             for (i = 1; i < argc; i++) {
@@ -1913,14 +1928,16 @@ static void Process_Command(char *line)
                             Token_Matches(argv[i], "SECond"))) {
                     field_count++;
                 } else {
-                    break;
+                    break;  // 字段名结束 后面是值
                 }
             }
+            // 值应在字段名之后 数量必须匹配 支持任意参数组合
             value_start = (uint8_t)(1U + field_count);
             if (field_count == 0U || argc != (uint8_t)(value_start + field_count)) {
                 UART_PutString("ERROR SYNTAX\r\n");
                 return;
             }
+            // 逐字段 + 值配对解析 DATE 可写年/月/日任意组合 TIME/ALARM 同理
             for (i = 0; i < field_count; i++) {
                 uint8_t field = (uint8_t)(1U + i);
                 uint8_t value = (uint8_t)(value_start + i);
@@ -1949,14 +1966,17 @@ static void Process_Command(char *line)
                 }
             }
         }
+        // DATE 写入后做日期规范化 闹钟写入后自动使能
         if (is_date) Normalize_Date();
         if (!is_date && !is_time) g_alarm.enabled = 1;
         UART_PutString("OK\r\n");
+        // *SET 成功后主动上报编辑事件 方便 PC 同步
         if (is_date) UART_Printf("*EVT:EDIT DATE %04u.%02u.%02u\r\n", g_date.y, g_date.m, g_date.d);
         else if (is_time) UART_Printf("*EVT:EDIT TIME %02u.%02u.%02u\r\n", g_time.h, g_time.mi, g_time.s);
         else UART_Printf("*EVT:EDIT ALARM %02u.%02u.%02u\r\n", g_alarm.t.h, g_alarm.t.mi, g_alarm.t.s);
         return;
     }
 
+    // 所有已知命令都未匹配 返回语法错误
     UART_PutString("ERROR SYNTAX\r\n");
 }

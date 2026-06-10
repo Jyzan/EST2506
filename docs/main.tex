@@ -1,0 +1,1308 @@
+% !TEX program = xelatex
+\documentclass[12pt,a4paper]{article}
+
+% ============================================================
+%  中文支持（ctex 在 XeLaTeX 下自动调用 fontspec）
+% ============================================================
+\usepackage[UTF8]{ctex}
+\setmainfont{Times New Roman}
+\setmonofont{Courier New}       % 等宽字体（Overleaf 预装微软核心字体，可用）
+
+% ============================================================
+%  页面与页眉页脚
+% ============================================================
+\usepackage{geometry}
+\geometry{left=2.5cm,right=2.5cm,top=2.8cm,bottom=2.5cm,headheight=15pt}
+
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small 智能联网时钟系统~·~简介}
+\fancyhead[R]{\small\leftmark}
+\fancyfoot[C]{\small 第~\thepage~页 \, / \, 共~\pageref{LastPage}~页}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\renewcommand{\sectionmark}[1]{\markboth{\thesection~~#1}{}}
+
+% 目录页等 plain 页样式也带页码
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\small 第~\thepage~页 \, / \, 共~\pageref{LastPage}~页}%
+  \renewcommand{\headrulewidth}{0pt}%
+}
+
+% ============================================================
+%  数学、图、表、列表
+% ============================================================
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=2em}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc}
+
+% 表格内允许自动换行的左对齐列
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% 题注样式：小五号加粗标签
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf,skip=6pt}
+\captionsetup[table]{position=above}
+
+% ============================================================
+%  代码样式（listings）
+% ============================================================
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{keywordcolor}{RGB}{0,0,200}
+\definecolor{stringcolor}{RGB}{170,0,0}
+\definecolor{commentcolor}{RGB}{0,128,0}
+\definecolor{numbergray}{RGB}{140,140,140}
+
+\lstset{
+    basicstyle=\small\ttfamily,
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    numbers=left,
+    numberstyle=\tiny\color{numbergray},
+    keywordstyle=\color{keywordcolor}\bfseries,
+    stringstyle=\color{stringcolor},
+    commentstyle=\color{commentcolor},
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=false,
+    tabsize=4,
+    columns=flexible,
+    keepspaces=true,
+    xleftmargin=2em,
+    framexleftmargin=2em,
+    aboveskip=8pt,
+    belowskip=8pt,
+}
+\lstdefinestyle{cstyle}{language=C}
+\lstdefinestyle{pystyle}{language=Python}
+\lstdefinestyle{plainstyle}{language={},numbers=none,keywordstyle={},commentstyle={},stringstyle={}}
+
+% ============================================================
+%  标题样式与段落
+% ============================================================
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+\titlespacing*{\section}{0pt}{18pt}{10pt}
+
+\usepackage{indentfirst}
+\setlength{\parindent}{2em}
+\emergencystretch=2em          % 缓解中英混排的断行溢出
+
+% ============================================================
+%  超链接（最后加载）
+% ============================================================
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,           % 目录、内部引用用黑色，打印更正式
+    urlcolor=blue,
+    citecolor=blue,
+    bookmarksnumbered=true,
+}
+
+% 封面填空：下划线内居中文字
+\newcommand{\coverfield}[1]{\underline{\makebox[7cm][c]{#1}}}
+
+\begin{document}
+
+% ============================================================
+%  封面
+% ============================================================
+\begin{titlepage}
+\centering
+\vspace*{2.5cm}
+
+{\Huge\bfseries 智能联网时钟系统}\\[0.8cm]
+{\Large 嵌入式系统设计大作业简介}
+
+\vspace{0.8cm}
+\rule{0.6\textwidth}{0.5pt}
+
+\vspace{2.6cm}
+
+{\large
+\begin{tabular}{rl}
+\textbf{大作业名称：} & \coverfield{智能联网时钟系统} \\[0.7cm]
+\textbf{学生姓名：}   & \coverfield{江彦佐} \\[0.7cm]
+\textbf{学\hspace{2em}号：} & \coverfield{524442910013} \\[0.7cm]
+\textbf{专\hspace{2em}业：} & \coverfield{自动化} \\[0.7cm]
+\textbf{班\hspace{2em}级：} & \coverfield{自感2421} \\[0.7cm]
+\textbf{完成日期：} & \coverfield{2026~年~6~月~15~日} \\
+\end{tabular}
+}
+
+\vfill
+
+{\large 本报告为嵌入式系统设计课程大作业提交材料}
+
+\vspace{1.5cm}
+\end{titlepage}
+
+% ============================================================
+%  目录
+% ============================================================
+\tableofcontents
+\thispagestyle{plain}
+\newpage
+
+% ============================================================
+%  1. 系统概述与整体架构
+% ============================================================
+\section{系统概述与整体架构}
+
+\subsection{系统简介}
+
+本系统基于 \textbf{S800硬件板卡(TI TM4C1294NCPDT)}作为下位机，\textbf{Python 3.11 + PyQt5} 作为 PC 上位机，通过 \textbf{USB 虚拟串口}实现 \textbf{1:1 数字孪生镜像的双向协同}。
+
+\begin{itemize}
+
+\item \textbf{硬件外设层}
+
+\textbf{组成}：S800 板卡 + I\textsuperscript{2}C 7SEG 数码管 + I\textsuperscript{2}C 按键 + GPIO USER1/USER2 + PCA9557 LED + 蜂鸣器 PK5
+
+\textbf{职责}：完成时钟走时、显示刷新、按键检测、闹钟触发等实时任务。
+
+\item \textbf{串口协议层}
+
+\textbf{组成}：UART0 中断驱动收发 + ring buffer 行拼装 + \texttt{Token\_Matches()} 容错解析
+
+\textbf{职责}：实现命令容错识别、多参数组合提取以及 FORMAT RIGHT 逆序响应功能。
+
+\item \textbf{PC 后台通信层}
+
+\textbf{组成}：\texttt{SerialWorker(QThread)} + \texttt{NetworkWorker(QThread)}
+
+\textbf{职责}：负责串口收发以及 NTP、天气数据的异步请求，跨线程通知 UI 更新。
+
+\item \textbf{PC UI 渲染层}
+
+\textbf{组成}：PyQt5 \texttt{MainWindow} + \texttt{TwinPanel} + \texttt{QPlainTextEdit} 日志
+
+\textbf{职责}：完成数字孪生渲染、控制面板交互、四色日志显示以及数据看板展示。
+
+\end{itemize}
+
+\subsection{系统架构框图}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{架构图.png}
+    \caption{系统整体架构框图}
+    \label{fig:arch}
+\end{figure}
+
+\subsection{数据流转逻辑}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    % 紧凑的水平和垂直间距，收缩上半部分体积
+    node distance=6mm and 8mm,
+    >=Stealth,
+    font=\small,
+    box/.style={rectangle, draw, thick, minimum width=2.4cm, minimum height=0.7cm, align=center, rounded corners=2pt},
+    mcu_style/.style={box, fill=blue!5, draw=blue!60},
+    pc_style/.style={box, fill=gray!5, draw=gray!60},
+    msg_style/.style={rectangle, draw=orange!70, fill=orange!5, dashed, minimum height=0.6cm, font=\footnotesize\ttfamily, minimum width=2.4cm, align=center},
+    % 下方函数框样式，缩窄宽度至 2.6cm 保证在一行内绝对不超页宽
+    func_style/.style={rectangle, draw=green!50!black, fill=green!5, minimum width=2.6cm, minimum height=0.8cm, align=center, font=\footnotesize}
+  ]
+
+    % ==================== 【上层区域：核心流转主图】 ====================
+    % 线路 1：MCU 物理按键触发
+    \node[mcu_style] (mcu_key) {MCU 物理按键};
+    \node[msg_style, right=of mcu_key] (evt_key) {*EVT:KEY};
+    \node[pc_style, right=of evt_key] (serial_recv) {SerialWorker.\\line\_received};
+    \node[pc_style, right=of serial_recv] (main_recv) {MainWindow.\\on\_received()};
+
+    % 线路 2：PC 虚拟按键点击 (减小垂直间距至 0.6cm)
+    \node[pc_style, below=0.6cm of mcu_key] (pc_key) {PC 虚拟按键点击};
+    \node[msg_style] (set_key) at ($(evt_key |- pc_key)$) {*SET:KEY <NAME>};
+    \node[pc_style] (write_line) at ($(serial_recv |- pc_key)$) {SerialWorker.\\write\_line()};
+    \node[mcu_style] (mcu_hkey) at ($(main_recv |- pc_key)$) {MCU Handle\_Key()};
+
+    % 线路 3：PC 控制面板
+    \node[pc_style, below=0.6cm of pc_key] (pc_panel) {PC 控制面板};
+    \node[msg_style] (set_cmd) at ($(evt_key |- pc_panel)$) {*SET:DATE/TIME...};
+    \node[mcu_style] (mcu_proc) at ($(main_recv |- pc_panel)$) {Process\_Command()};
+
+    % 线路 4：PC 1Hz 定时器
+    \node[pc_style, below=0.6cm of pc_panel] (pc_timer) {PC 1Hz 定时器};
+    \node[msg_style] (ping_pong) at ($(evt_key |- pc_timer)$) {*PING / *PONG};
+    \node[mcu_style] (latency) at ($(main_recv |- pc_timer)$) {延迟计算 +\\ 在线状态维护};
+
+    % 连线绘制 (主图)
+    \draw[->, thick] (mcu_key) -- (evt_key); \draw[->, thick] (evt_key) -- (serial_recv); \draw[->, thick] (serial_recv) -- (main_recv);
+    \draw[->, thick] (pc_key) -- (set_key); \draw[->, thick] (set_key) -- (write_line); \draw[->, thick] (write_line) -- (mcu_hkey);
+    \draw[->, thick] (pc_panel) -- (set_cmd); \draw[->, thick] (set_cmd) -- (mcu_proc);
+    \draw[->, thick] (pc_timer) -- (ping_pong); \draw[->, thick] (ping_pong) -- (latency);
+
+
+    % ==================== 【下层区域：联动触发回调 (一行四列)】 ====================
+    % 以整幅主图最底部的 pc_timer 节点为基准，强行向下延伸 1.4cm 彻底拉开空间
+    \node[func_style, below=1.8cm of pc_timer, anchor=west, xshift=-0.5cm] (f1) {1. handle\_protocol\_\\line()};
+    \node[func_style, right=0.3cm of f1] (f2) {2. twin.update\_digits()\\ / update\_leds()};
+    \node[func_style, right=0.3cm of f2] (f3) {3. add\_log()\\ \textcolor{red!70!black}{(四色着色)}};
+    \node[func_style, right=0.3cm of f3] (f4) {4. update\_status()\\ \textcolor{blue!70!black}{(状态栏刷新)}};
+
+
+    % ==================== 【连接线：外部右侧绕行总线】 ====================
+    % 从 MainWindow 节点右侧延伸出去，顺着图表的右侧边缘向下走，绝不穿透和触碰任何中间节点
+    \coordinate (right_pass) at ($(main_recv.east) + (1.0, 0)$);
+    \coordinate (bus_line) at ($(f1.north) + (0, 0.5)$);
+    
+    % 绘制外围灰色绕行动作线
+    \draw[gray!80, thick, dashed] (main_recv.east) -- (right_pass) |- (bus_line);
+    
+    % 分发到下方4个绿色框
+    \foreach \x in {f1, f2, f3, f4} {
+        \draw[->, gray!80, thick, dashed] (bus_line -| \x.north) -- (\x.north);
+    }
+    \draw[gray!80, thick, dashed] (bus_line -| f1.north) -- (bus_line -| f4.north);
+
+    % 在右侧绕行处放置干净的文字标签，不遮挡任何地方
+    \node[gray!90, font=\scriptsize, anchor=west] at ($(right_pass) + (0, -2.0)$) {联动触发回调};
+
+  \end{tikzpicture}
+  \caption{系统数据流转与通信协议逻辑示意图}
+\end{figure}
+
+% ============================================================
+%  2. 协议规范与容错设计
+% ============================================================
+\section{协议规范与容错设计}
+
+\subsection{通信参数}
+
+\begin{table}[H]
+\centering
+\caption{串口通信参数}
+\begin{tabular}{ll}
+\toprule
+\textbf{参数} & \textbf{规格} \\
+\midrule
+物理层 & USB 虚拟串口 \\
+波特率 & 115200 \\
+数据格式 & 8 数据位，无校验，1 停止位，无流控 \\
+字符编码 & ASCII \\
+行结束符 & \texttt{\textbackslash r\textbackslash n} 或 \texttt{\textbackslash n} 兼容 \\
+单帧最大长度 & 64 字节 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{容错三件套}
+
+\subsubsection{大小写不敏感}
+
+MCU 端 \texttt{Process\_Command()} 收到一行指令后，首先调用 \texttt{Upper\_Copy()}（\texttt{main.c:1605-1610}）将整行处理为大写：
+
+\begin{lstlisting}[style=cstyle]
+static void Upper_Copy(char *dst, const char *src, uint16_t max)
+{
+    uint16_t i;
+    for (i = 0; i < max - 1 && src[i]; i++)
+        dst[i] = (char)toupper((unsigned char)src[i]);
+    dst[i] = '\0';
+}
+\end{lstlisting}
+
+因此 \texttt{*SET:TIME} 与 \texttt{*set:time} 完全等价。
+
+\subsubsection{空格与制表符多重容错}
+
+命令行通过 \texttt{strtok(work, "~\textbackslash t")} 分割参数（\texttt{main.c:1674}），任意数量的空格或 Tab 均可正确分割：
+
+\begin{lstlisting}[style=cstyle]
+tok = strtok(work, " \t");
+while (tok && argc < 14) {
+    argv[argc++] = tok;
+    tok = strtok(NULL, " \t");
+}
+\end{lstlisting}
+
+如 \texttt{*SET:\ \ TIME\ \ \ HOUR\ \ 12} 与 \texttt{*SET:TIME HOUR 12} 同样合法。
+
+\subsubsection{指令大写缩写识别}
+
+\texttt{Token\_Matches()}（\texttt{main.c:1616-1627}）是实现缩写识别的关键函数：
+
+\begin{lstlisting}[style=cstyle]
+static bool Token_Matches(const char *token, const char *pattern)
+{
+    char t[24], p[24];
+    uint8_t req = 0, i;
+    Upper_Copy(t, token, sizeof(t));
+    Upper_Copy(p, pattern, sizeof(p));
+    // 统计 pattern 中大写字母数量 即最少必输字符数
+    for (i = 0; pattern[i]; i++)
+        if (isupper((unsigned char)pattern[i])) req++;
+    // token 长度必须 >= 必输字符数 <= 完整 pattern 长度
+    if (strlen(t) < req || strlen(t) > strlen(p)) return false;
+    return strncmp(p, t, strlen(t)) == 0;
+}
+\end{lstlisting}
+
+\textbf{原理}：模式串 \texttt{MINute} 中，大写字母为 \texttt{M}、\texttt{I}、\texttt{N}，小写字母 \texttt{ute} 可省略。用户输入至少 3 个字符且为模式串前缀即视为合法：
+\begin{itemize}
+    \item \texttt{MIN} $\rightarrow$ 3 字符 $\ge$ req=3，前缀匹配 $\rightarrow$ \textbf{合法}
+    \item \texttt{MINU} $\rightarrow$ 4 字符 $\ge$ req=3，前缀匹配 $\rightarrow$ \textbf{合法}
+    \item \texttt{MI} $\rightarrow$ 2 字符 $<$ req=3 $\rightarrow$ \textbf{拒绝}
+\end{itemize}
+
+当 \texttt{pattern} 全部为大写字母时（如 \texttt{ON}、\texttt{OFF}、\texttt{LEFT}），\texttt{req = strlen(pattern)}，即必须完整输入，防止误匹配。
+
+\subsection{FORMAT RIGHT 逆序传输机制}
+
+发送 \texttt{*SET:FORMAT RIGHT} 后，MCU 将 \texttt{g\_format} 切换为 \texttt{FMT\_RIGHT}（\texttt{main.c:1771}）。此后所有 \texttt{*GET} 应答和 \texttt{*EVT:DISP} 上报均触发逆序逻辑。
+
+\texttt{Send\_OK\_Value()}（\texttt{main.c:1650-1662}）：
+
+\begin{lstlisting}[style=cstyle]
+static void Send_OK_Value(const char *value)
+{
+    char out[32];
+    uint8_t len = (uint8_t)strlen(value), i;
+    if (g_format == FMT_LEFT) {
+        UART_Printf("OK %s\r\n", value);
+        return;
+    }
+    // RIGHT 模式下逐字符逆序
+    for (i = 0; i < len; i++) out[i] = value[len - 1U - i];
+    out[len] = '\0';
+    UART_Printf("OK %s\r\n", out);
+}
+\end{lstlisting}
+
+\textbf{示例}：当前时间 \texttt{12:30:45}，PC 查询：
+
+\begin{table}[H]
+\centering
+\caption{FORMAT LEFT/RIGHT 应答对比}
+\begin{tabular}{lll}
+\toprule
+\textbf{项目} & \textbf{LEFT} & \textbf{RIGHT} \\
+\midrule
+\texttt{*GET:TIME} 应答 & \texttt{OK 12.30.45} & \texttt{OK 54.03.21} \\
+数码管显示 & \texttt{12.30.45} & \texttt{54.03.21} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+数码管显示同步逆序，小数点位置按下一位规则跟随，逆序后 dp 提前一位。
+
+\textbf{PC 端协议层解码}（\texttt{protocol.py}）：
+
+\begin{lstlisting}[style=pystyle]
+def parse_disp_event(line: str):
+    """解析 *EVT:DISP <8字符> <dpHex>，dpHex 为 2 位 hex 表示 8 位小数点"""
+    body = line[len("*EVT:DISP "):]
+    payload = body[:-3][:8].ljust(8).replace("_", " ")
+    dp = int(body[-2:], 16)
+    return payload, dp
+
+def parse_led_event(line: str) -> int:
+    return int(line.split()[-1], 16)
+\end{lstlisting}
+
+\textbf{PC 端 FORMAT 状态同步}（\texttt{main.py:585-603}）：PC 收到 \texttt{OK LEFT} / \texttt{OK RIGHT} 后更新 \texttt{state.fmt}，同时兼容 RIGHT 模式下 MCU 上报的逆序字符串 \texttt{TFEL} / \texttt{THGIR}。
+
+% ============================================================
+%  3. 关键代码片段与实现细节
+% ============================================================
+\section{关键代码片段与实现细节}
+
+\subsection{PC 端串口后台线程（\texttt{serial\_worker.py}）}
+
+\subsubsection{设计目标}
+
+将串口 I/O 从 Qt 主线程中完全剥离，通过 \texttt{pyqtSignal} 跨线程通信，确保 1Hz 心跳、\texttt{*EVT:DISP} 事件高频上报时 GUI 永不卡顿。
+
+\subsubsection{信号接口}
+
+\begin{lstlisting}[style=pystyle]
+class SerialWorker(QThread):
+    line_received = pyqtSignal(str)        # 收到一行完整报文 -> 主线程协议解析
+    connection_changed = pyqtSignal(bool)  # 连接状态变化 -> 更新 UI 指示灯
+    latency_updated = pyqtSignal(int)      # 心跳延迟更新 (ms)
+    error = pyqtSignal(str)                # 错误信息 -> 弹窗 + 红色日志 + 禁用控件
+\end{lstlisting}
+
+\subsubsection{线程主循环}
+
+\begin{lstlisting}[style=pystyle]
+def run(self):
+    self._running = True
+    try:
+        self._ser = serial.Serial(
+            self.port, self.baud,
+            timeout=0.1,          # 100ms 读超时，避免阻塞卡死
+            write_timeout=0.4,
+            dsrdtr=False, rtscts=False, xonxoff=False,
+        )
+        self.connection_changed.emit(True)
+    except Exception as exc:
+        self.error.emit(f"open {self.port} failed: {exc}")
+        return
+
+    buf = bytearray()  # ring buffer 拼行
+    while self._running:
+        try:
+            while not self._tx.empty():  # 消费写队列
+                self._ser.write(
+                    self._tx.get_nowait().encode("ascii", errors="ignore"))
+            chunk = self._ser.read(128)  # 非阻塞读 128 字节
+            if chunk:
+                buf.extend(chunk)
+                while b"\n" in buf:      # 按 \n 分割完整行
+                    line, _, rest = buf.partition(b"\n")
+                    buf = bytearray(rest)
+                    text = line.decode("ascii", errors="replace").strip()
+                    if text:
+                        self.line_received.emit(text)  # 跨线程发送
+            else:
+                time.sleep(0.005)        # 无数据时让出 CPU
+        except Exception as exc:
+            self.error.emit(f"serial error: {exc}")
+            break
+\end{lstlisting}
+
+\subsection{PC 端数字孪生镜像面板（\texttt{twin\_panel.py}）}
+
+\subsubsection{自绘 7SEG 数码管控件（SevenSegmentDigit）}
+
+使用 \texttt{QPainter} 在 \texttt{paintEvent} 中逐段绘制：
+
+\begin{lstlisting}[style=pystyle]
+def paintEvent(self, _event):
+    p = QPainter(self)
+    p.setRenderHint(QPainter.Antialiasing)
+    w, h = self.width(), self.height()
+    active = QColor("#FF3030")      # 亮段：LED 红
+    inactive = QColor("#220000")    # 暗段：暗红底色
+    p.fillRect(self.rect(), QColor("#050505"))  # 深黑背景
+
+    on = "" if (self.blink and not self._blink_visible) \
+           else self.MAP.get(self.char, "")
+    for name, rect in self.SEGMENTS.items():  # 7 段
+        x, y, rw, rh = rect
+        p.setBrush(QBrush(active if name in on else inactive))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(QRectF(x * w, y * h, rw * w, rh * h), 3, 3)
+    # 小数点
+    p.setBrush(QBrush(active if self.dp else inactive))
+    p.drawEllipse(QRectF(0.82 * w, 0.87 * h, 0.12 * w, 0.08 * h))
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{7SEG 段坐标（相对坐标 0.0--1.0）}
+\begin{tabular}{cll}
+\toprule
+\textbf{段} & \textbf{位置 (x, y, w, h)} & \textbf{说明} \\
+\midrule
+a & (0.22, 0.06, 0.56, 0.08) & 上横 \\
+b & (0.78, 0.13, 0.08, 0.33) & 右上竖 \\
+c & (0.78, 0.54, 0.08, 0.33) & 右下竖 \\
+d & (0.22, 0.87, 0.56, 0.08) & 下横 \\
+e & (0.14, 0.54, 0.08, 0.33) & 左下竖 \\
+f & (0.14, 0.13, 0.08, 0.33) & 左上竖 \\
+g & (0.22, 0.47, 0.56, 0.08) & 中横 \\
+dp & (0.82, 0.87, 0.12, 0.08) & 小数点 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+字符映射表覆盖 \texttt{0-9}、\texttt{A-Z}、\texttt{-}、\texttt{\_}、空格共 38 个字符，段码与 MCU 端保持一致。
+
+\subsubsection{双向同步逻辑}
+
+\textbf{下行（PC$\rightarrow$MCU）：虚拟按键 $\rightarrow$ \texttt{*SET:KEY}}
+
+\begin{lstlisting}[style=pystyle]
+def on_virtual_key(self, name: str):
+    if name == "USER1":          # USER1 短按 = 请求 PC 对时
+        self.ntp_sync()
+        return
+    self.send_command(f"*SET:KEY {name}")
+
+def on_virtual_long_key(self, name: str):
+    if name == "FUNC":           # FUNC 长按 = SAVE
+        self.send_command("*SET:KEY SAVE")
+    elif name == "ADD":          # ADD 长按 = 连加 3 次 (200ms 间隔)
+        for i in range(3):
+            QTimer.singleShot(i * 200,
+                lambda: self.send_command("*SET:KEY ADD"))
+    elif name == "USER1":        # USER1 长按 = 板端 NTP 状态短显
+        self.send_command("*SET:KEY USER1")
+\end{lstlisting}
+
+\textbf{上行（MCU$\rightarrow$PC）：\texttt{*EVT:KEY} $\rightarrow$ 按钮高亮 200ms}
+
+\begin{lstlisting}[style=pystyle]
+def pulse_key(self, name: str):
+    key = normalize_key_name(name)
+    btn = self.buttons.get(key)
+    if not btn:
+        return
+    btn.setProperty("pulse", True)
+    btn.style().unpolish(btn)
+    btn.style().polish(btn)
+    QTimer.singleShot(200, lambda b=btn: self._clear_pulse(b))
+\end{lstlisting}
+
+\subsubsection{长按检测机制}
+
+\texttt{pressed} 信号触发后启动定时器，\texttt{released} 在定时器到期前发生则视为短按：
+
+\begin{lstlisting}[style=pystyle]
+def _on_pressed(self, name: str):
+    self._pressed[name] = True
+    self._long_sent[name] = False
+    QTimer.singleShot(800, lambda n=name: self._emit_long(n))
+
+def _on_released(self, name: str):
+    if self._pressed.get(name) \
+            and not self._long_sent.get(name):
+        self.key_clicked.emit(name)    # 短按
+    self._pressed[name] = False
+
+def _emit_long(self, name: str):
+    if self._pressed.get(name):
+        self._long_sent[name] = True
+        self.key_long.emit(name)       # 长按
+\end{lstlisting}
+
+\subsubsection{LED 控件（LedIndicator）}
+
+LED 采用 QSS \texttt{qradialgradient} 径向渐变绘制，切换 \texttt{objectName} 实现亮灭：
+
+\begin{lstlisting}[style=pystyle]
+class LedIndicator(QWidget):
+    def __init__(self, index: int, hint: str):
+        super().__init__()
+        self._dot = QLabel()
+        self._dot.setObjectName("led_off")
+        self._dot.setFixedSize(30, 30)
+        caption = QLabel(f"L{index + 1}\n{hint}")
+
+    def set_on(self, on: bool):
+        self._dot.setObjectName("led_on" if on else "led_off")
+        self._dot.style().unpolish(self._dot)
+        self._dot.style().polish(self._dot)
+\end{lstlisting}
+
+亮态 QSS：\texttt{qradialgradient(cx:0.5, cy:0.5, radius:0.5, stop:0 \#FFFF80, stop:1 \#FFC800)}。
+
+\subsubsection{接收更新入口（\texttt{main.py}）}
+
+\begin{lstlisting}[style=pystyle]
+def handle_protocol_line(self, line: str):
+    if line.startswith("*PONG"):
+        self.last_pong_time = time.time()
+        self.state.online = True
+        latency = int((time.time() - self.last_ping_time) * 1000)
+        self.worker.latency_updated.emit(latency)
+        return
+    if line.startswith("*EVT:DISP"):
+        text, dp = parse_disp_event(line)
+        self.twin.update_digits(text, dp)
+        return
+    if line.startswith("*EVT:LED"):
+        self.twin.update_leds(parse_led_event(line))
+        return
+    if line.startswith("*EVT:KEY"):
+        name = line.split()[-1]
+        self.twin.pulse_key(name)
+        if name == "USER1":
+            self.ntp_sync()
+        return
+    if line.startswith("*EVT:ALARM"):
+        QMessageBox.information(self, "闹钟", "S800 闹钟正在响铃。")
+        return
+    if line.startswith("*EVT:MODE"):
+        self.state.mode = "NIGHT" if "NIGHT" in line else "DAY"
+        self.update_status()
+        return
+\end{lstlisting}
+
+\subsection{MCU 端中断系统与实时调度}
+
+\subsubsection{设计思想}
+
+MCU 端采用\textbf{中断优先、前后台协作}的架构：所有硬实时任务，如显示扫描、按键采样、UART 收发等在中断服务例程中完成，主循环仅负责非实时的业务逻辑如命令解析、显示内容计算、状态机推进等。这种设计使得动态扫描不会卡顿，串口 FIFO 不会溢出。
+
+\subsubsection{SysTick 系统时基}
+
+\texttt{SysTick\_Handler()} 每 1 毫秒触发一次，驱动四个分频标志（\texttt{main.c:253-259}）：
+
+\begin{lstlisting}[style=cstyle]
+void SysTick_Handler(void)
+{
+    g_tick_ms++;
+    if ((g_tick_ms % 5U) == 0U)    flag_5ms = 1;
+    if ((g_tick_ms % 10U) == 0U)   flag_10ms = 1;
+    if ((g_tick_ms % 100U) == 0U)  flag_100ms = 1;
+    if ((g_tick_ms % 1000U) == 0U) flag_1s = 1;
+}
+\end{lstlisting}
+
+全局变量 \texttt{g\_tick\_ms}是全部定时和超时的单一基准时钟源。所有计时函数均通过 \texttt{Tick\_TimedOut(start, span)} 计算差值，规避 int 溢出的风险。
+
+\subsubsection{Timer0A 显示扫描与按键采样}
+
+\texttt{TIMER0A\_Handler()} 每 1 毫秒执行一次（\texttt{main.c:270-293}），是系统最关键的中断服务例程：
+
+\begin{lstlisting}[style=cstyle]
+void TIMER0A_Handler(void)
+{
+    static uint8_t key_div = 0;
+
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+    Display_Refresh();
+
+    if (g_led_dirty) {
+        g_led_dirty = false;
+        I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT,
+                       (uint8_t)~g_led_byte);
+    }
+
+    if (++key_div >= KEY_SCAN_TICKS) {
+        uint8_t tca = I2C0_ReadByte(TCA6424_I2CADDR,
+                                     TCA6424_INPUT_PORT0);
+        uint16_t raw = 0;
+        uint8_t i;
+        key_div = 0;
+        for (i = 0; i < 8; i++)
+            if ((tca & (1U << i)) == 0) raw |= (1U << i);
+        g_tca_key_raw = (uint8_t)raw;
+    }
+}
+\end{lstlisting}
+
+\textbf{关键设计要点}：
+\begin{itemize}
+    \item 所有 I\textsuperscript{2}C 总线访问都集中在此 ISR 内，从而消除总线竞争
+    \item LED 更新采用标志\texttt{g\_led\_dirty}延迟写入，避免每次逻辑变更都触发阻塞写入
+    \item 按键采样以 20 毫秒间隔分频，采样结果供主循环中的 \texttt{Key\_Scan()} 使用
+    \item I\textsuperscript{2}C 异常检测与恢复：连续 3 次写入失败时设置 \texttt{g\_i2c\_recover\_request}，由主循环调用 \texttt{I2C0\_BusRecover()} 恢复，避免在 ISR 中执行耗时的总线恢复操作
+\end{itemize}
+
+\subsubsection{UART 中断驱动收发}
+
+UART 接收采用最高优先级中断（\texttt{main.c:300-320}），接收中断优先级最高，确保在 I\textsuperscript{2}C 事务进行时到达的字节不会因 FIFO 溢出而丢失。ISR 仅操作 ring buffer，绝不访问 I\textsuperscript{2}C，因此抢占显示扫描 ISR 是安全的。
+
+\texttt{UART\_RxIsrHandler()}（\texttt{main.c:325-362}）的逐行组装逻辑：
+
+\begin{lstlisting}[style=cstyle]
+static void UART_RxIsrHandler(uint8_t byte)
+{
+    uint8_t i;
+
+    if (byte == '\r' || byte == '\n') {
+        if (g_rx_asm_ovf) {
+            g_rx_asm_ovf = false;
+            g_rx_asm_len = 0;
+            g_line_too_long = true;
+            return;
+        }
+        if (g_rx_asm_len == 0) return;   // 忽略空行
+        Mark_Serial_Activity();
+        for (i = 0; i < g_rx_asm_len; i++) {
+            uint16_t next = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
+            if (next != g_rx_tail) {
+                g_rx_ring[g_rx_head] = g_rx_asm[i];
+                g_rx_head = next;
+            }
+        }
+        {
+            uint16_t next = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
+            if (next != g_rx_tail) {
+                g_rx_ring[g_rx_head] = '\n';
+                g_rx_head = next;
+            }
+        }
+        rx_line_ready++;
+        g_rx_asm_len = 0;
+        return;
+    }
+
+    if (g_rx_asm_len >= LINE_MAX) {
+        g_rx_asm_ovf = true;   // 继续消耗字节直到 CR/LF
+        return;
+    }
+    g_rx_asm[g_rx_asm_len++] = (char)byte;
+}
+\end{lstlisting}
+
+\textbf{设计决策}：采用两级缓冲——\texttt{g\_rx\_asm[ ]}（行组装缓冲）$\rightarrow$ \texttt{g\_rx\_ring[ ]}（环形队列）。行结束符到达时整行原子提交到 ring，主循环通过 \texttt{UART\_GetLine()} 从中提取完整命令行，调用 \texttt{Process\_Command()} 处理。
+
+\subsection{MCU 端数码管动态扫描}
+
+\subsubsection{显示刷新（Display\_Refresh）}
+
+\texttt{Display\_Refresh()}（\texttt{main.c:851-898}）每秒被 Timer0A ISR 调用 1000 次，每次刷新一位数码管（共 8 位），形成稳定的 125 Hz 刷新率（1000 / 8）。
+
+\begin{lstlisting}[style=cstyle]
+static void Display_Refresh(void)
+{
+    static bool blanked = false;
+    uint8_t code;
+    uint8_t err = 0;
+    bool blink_off;
+
+    if (!disp_on) {
+        /* 仅在首次进入熄灭态时写一次 I2C 若每个 tick 都写两次字节
+           会在高频 ISR 中卡住足够长时间饿死 UART RX FIFO */
+        if (!blanked) {
+            I2C0_WriteByte(..., OUTPUT_PORT2, 0x00);
+            I2C0_WriteByte(..., OUTPUT_PORT1, 0x00);
+            blanked = true;
+        }
+        return;
+    }
+    blanked = false;
+
+    if (g_scan_pos >= g_scan_limit)
+        g_scan_pos = 0;
+
+    blink_off = (disp_blink_mask & (1U << g_scan_pos))
+                && !g_blink_on;
+    code = blink_off ? 0U : SegCode(disp_buf[g_scan_pos]);
+    if (!blink_off && disp_dp[g_scan_pos]) code |= 0x80;
+
+    // 先清零位选消除鬼影 再通过一次自动递增突发写入段码和新位选
+    I2C0_WriteByte(..., OUTPUT_PORT2, 0x00);
+    I2C0_WriteTwo(..., AUTO_INC | OUTPUT_PORT1,
+                  code, (1U << g_scan_pos));
+}
+\end{lstlisting}
+
+\textbf{防鬼影策略}：每次位切换时先向 PORT2 写入 \texttt{0x00}（消隐），再写入新段码和新位选。端口 1（段码）和端口 2（位选）使用 TCA6424 的自动递增特性（\texttt{AUTO\_INC}），在单次 I\textsuperscript{2}C burst 中完成，杜绝残影。
+
+\subsubsection{显示内容构建（Build\_Display）}
+
+主循环每秒调用一次 \texttt{Build\_Display()}（\texttt{main.c:985}），按优先级组装 \texttt{disp\_buf[8]}：
+
+\begin{enumerate}
+    \item \textbf{倒计时优先}：若 \texttt{g\_countdown\_active} 为真，显示格式 \texttt{CDMMSS}，第 4 位小数点常亮
+    \item \textbf{天气短显}：若 \texttt{g\_weather\_until\_ms} 未到期，显示天气文本，过期数据闪烁提示
+    \item \textbf{流水消息}：若 \texttt{g\_message\_until\_ms} 未到期，执行流水滚动，\texttt{Scroll\_Tick()} 负责方向与速度控制
+    \item \textbf{正常时钟}：根据当前显示模式（时间 / 日期 / 年份）格式化，NIGHT 模式下仅显示前 4 位（时 + 分）
+\end{enumerate}
+
+\subsubsection{段码转换（SegCode）}
+
+\texttt{SegCode()}（\texttt{main.c:812-846}）将 ASCII 字符映射为 8 位段码（bit 0--6 对应 a--g，bit 7 为小数点），覆盖数字 0--9、大写字母 A--Z、横线 \texttt{-}和下划线 \texttt{\_}。段码表与 PC 端 \texttt{SevenSegmentDigit.MAP} 保持一致，确保数字孪生镜像的字符渲染完全一致。
+
+\subsection{MCU 端按键状态机与事件分发}
+
+\subsubsection{按键扫描（Key\_Scan）}
+
+\texttt{Key\_Scan()}（\texttt{main.c:1159}）在 \texttt{flag\_10ms} 触发时由主循环调用，完成：
+
+\begin{enumerate}
+    \item \textbf{数据融合}：合并 I\textsuperscript{2}C 按键和 GPIO 按键（USER1/2，PJ0/PJ1）
+    \item \textbf{软件去抖}：连续 \texttt{KEY\_DEBOUNCE\_COUNT} 次采样结果一致才认为状态稳定
+    \item \textbf{边缘检测}：稳定值变化时识别按下和释放事件，推入事件队列
+    \item \textbf{长按与连发}：按下后基于 \texttt{g\_tick\_ms} 计时，超过800 毫秒产生 \texttt{KEV\_LONG} 事件；ADD 键在编辑态下每200 毫秒产生 \texttt{KEV\_REPEAT}
+\end{enumerate}
+
+\begin{lstlisting}[style=cstyle]
+// 长按与连发由时间驱动 与边沿检测独立
+if (g_key_fsm[b] == 1 &&
+    Tick_TimedOut(g_key_press_ms[b], FUNC_LONG_MS)) {
+    g_key_fsm[b] = 2;
+    Key_Push(code, KEV_LONG);
+}
+if (code == KEY_ADD && g_edit_state != ST_IDLE) {
+    if (Tick_TimedOut(g_key_repeat_ms[b], ADD_REPEAT_MS)) {
+        g_key_repeat_ms[b] = g_tick_ms;
+        Key_Push(code, KEV_REPEAT);
+    }
+}
+\end{lstlisting}
+
+\subsubsection{事件分发（Dispatch\_Key）}
+
+\texttt{Dispatch\_Key()}（\texttt{main.c:1222}）将事件类型分发到具体行为函数 \texttt{Handle\_Key()}或直接处理长按/连发：
+
+\begin{itemize}
+    \item \texttt{FUNC} 键：短按在编辑态循环切换模式（日期 $\rightarrow$ 时间 $\rightarrow$ 闹钟）；长按等效 SAVE（保存退出）；响铃中短按优先关闹钟
+    \item \texttt{SHIFT} 键：编辑态下循环切换高亮字段
+    \item \texttt{ADD} 键：当前编辑字段循环加 1，含进位与范围钳制
+    \item \texttt{SAVE} 键：保存编辑缓冲区的值并退出编辑态
+    \item \texttt{DISP / SPEED / FORMAT / EXT}：切换显示模式、流水速度、流水方向、触发 EXT 事件上报
+    \item \texttt{USER1}：上报 \texttt{*EVT:KEY USER1} 请求 PC 对时
+    \item \texttt{USER2}：若天气数据有效则短显 5 秒，否则显示 \texttt{--C---}
+\end{itemize}
+
+按键事件通过长度为 8 的环形队列（\texttt{g\_evq[ ]}）解耦 ISR 与主循环，ISR 仅推入事件，主循环取出，避免阻塞。
+
+% ============================================================
+%  4. 扩展功能实现说明
+% ============================================================
+\section{扩展功能实现说明}
+
+% ── E1 ──
+\subsection{E1：NTP 网络异步对时}
+
+\subsubsection{动机}
+
+板载 MCU 无后备电池供电的 RTC，每次上电需从 PC 获取标准网络时间校准。
+
+\subsubsection{实现}
+
+\texttt{ntp\_helper.py} —— 三服务器容错策略：
+
+\begin{lstlisting}[style=pystyle]
+SERVERS = ("ntp.aliyun.com", "cn.ntp.org.cn", "ntp.ntsc.ac.cn")
+
+def fetch_network_time(timeout=3):
+    last_error = None
+    for server in SERVERS:
+        try:
+            response = ntplib.NTPClient().request(
+                server, version=3, timeout=timeout)
+            network_time = dt.datetime.fromtimestamp(response.tx_time)
+            delta_ms = int((network_time - dt.datetime.now())
+                           .total_seconds() * 1000)
+            return network_time, delta_ms, server
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"NTP unavailable: {last_error}")
+\end{lstlisting}
+
+\texttt{main.py} —— 异步调度：
+
+\begin{lstlisting}[style=pystyle]
+def ntp_sync(self):
+    self.net_worker = NetworkWorker("ntp")
+    self.net_worker.done.connect(self.on_network_done)
+    self.net_worker.failed.connect(self.on_network_failed)
+    self.net_worker.start()
+
+def on_network_done(self, kind, data):
+    now, delta_ms, server = data
+    self.send_command(
+        f"*SET:DATE YEAR MONTH DATE {now.year:04d} {now.month:02d} {now.day:02d}")
+    self.send_command(
+        f"*SET:TIME HOUR MIN SEC {now.hour:02d} {now.minute:02d} {now.second:02d}")
+    self.send_command("*NTP SYNC")
+    self.store.append("SYNC", f"delta {delta_ms}")
+    self.add_log("SYS", f"NTP sync {server} delta {delta_ms} ms")
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{NTP 对时触发方式}
+\begin{tabular}{ll}
+\toprule
+\textbf{方式} & \textbf{路径} \\
+\midrule
+PC 点击 [NTP 对时] 按钮 & \texttt{ntp\_sync()} 直接调用 \\
+MCU 按下 USER1 & \texttt{*EVT:KEY USER1} $\rightarrow$ PC 自动触发 \texttt{ntp\_sync()} \\
+网络失败 & 弹窗 + 红色日志告警 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{LED 指示}：MCU 收到 \texttt{*NTP SYNC} 后置位 \texttt{g\_ntp\_synced}，LED8（NTP）常亮表示已同步；超过 24 小时未同步时 LED8 慢闪（DRIFT 状态）。
+
+% ── E2 ──
+\subsection{E2：天气获取与板端联动}
+
+\subsubsection{动机}
+
+使时钟系统具备环境感知能力，温度与天气状况在板端和 PC 端同步呈现。
+
+\subsubsection{实现}
+
+\texttt{weather\_helper.py} —— wttr.in 免 Key 接口：
+
+\begin{lstlisting}[style=pystyle]
+def fetch_shanghai_weather(timeout=5):
+    data = requests.get(
+        "https://wttr.in/Shanghai?format=j1",
+        timeout=timeout).json()
+    current = data["current_condition"][0]
+    temp = int(current["temp_C"])
+    description = current["weatherDesc"][0]["value"]
+    return temp, map_condition(description), description
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{天气缩写映射}
+\begin{tabular}{lcl}
+\toprule
+\textbf{wttr.in 原文} & \textbf{缩写} & \textbf{含义} \\
+\midrule
+Sunny, Clear & \texttt{SUN} & 晴 \\
+Partly cloudy, Cloudy & \texttt{CLD} & 多云 \\
+Overcast & \texttt{OVC} & 阴天 \\
+Rain, Light rain, Heavy rain & \texttt{RAI} & 雨 \\
+Snow, Light snow & \texttt{SNO} & 雪 \\
+Fog, Mist & \texttt{FOG} & 雾 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{调度策略}：启动后 1 秒首次拉取，此后每 30 分钟 \texttt{QTimer} 自动刷新。
+
+\textbf{MCU 联动}：PC 下发 \texttt{*SET:WEA <T> <COND>}，MCU 解析后：
+\begin{itemize}
+    \item LED5亮 = 晴；LED6慢闪 = 雨/雪；LED7亮 = 温度 $\ge$ 30\,$^{\circ}$C
+    \item 按 USER2 短显天气 5 秒，短显期间 \texttt{*EVT:DISP} 正常上报，PC 镜像自动跟随
+\end{itemize}
+
+% ── E3 ──
+\subsection{E3：自动昼夜模式}
+
+\subsubsection{实现}
+
+\texttt{astral\_helper.py} —— 按上海经纬度计算日出日落：
+
+\begin{lstlisting}[style=pystyle]
+CITY = LocationInfo(
+    "Shanghai", "China", "Asia/Shanghai", 31.2304, 121.4737)
+
+def current_daynight():
+    times = sun(CITY.observer, date=dt.date.today(),
+                tzinfo=CITY.timezone)
+    now = dt.datetime.now(times["sunrise"].tzinfo)
+    mode = "DAY" if times["sunrise"] <= now <= times["sunset"] \
+           else "NIGHT"
+    return mode, times["sunrise"], times["sunset"]
+\end{lstlisting}
+
+PC 每分钟通过 \texttt{QTimer} 检查一次，跨越日出/日落时自动切换：
+
+\begin{lstlisting}[style=pystyle]
+def auto_daynight(self):
+    if not self.auto_mode_check.isChecked():
+        return
+    mode, sunrise, sunset = current_daynight()
+    self.sun_label.setText(
+        f"日升/日落: {sunrise:%H:%M} / {sunset:%H:%M}")
+    self.send_command(f"*SET:MODE {mode}")
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{昼夜模式行为差异}
+\begin{tabular}{cccc}
+\toprule
+\textbf{模式} & \textbf{7SEG} & \textbf{LED} & \textbf{蜂鸣器} \\
+\midrule
+DAY & 完整 8 位 & 全启用 & 正常 \\
+NIGHT & \textbf{仅时/分 4 位} & \textbf{仅心跳} & \textbf{抑制} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ── E4 ──
+\subsection{E4：数据可视化看板}
+
+\subsubsection{数据持久化}
+
+\texttt{log\_store.py} —— \texttt{events.csv} 追加记录：
+
+\begin{lstlisting}[style=pystyle]
+class EventStore:
+    HEADER = ("timestamp", "type", "data")
+
+    def append(self, event_type: str, data: str):
+        with self.path.open("a", newline="",
+                encoding="utf-8-sig") as file:
+            csv.writer(file).writerow([
+                dt.datetime.now()
+                  .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                event_type, data,
+            ])
+\end{lstlisting}
+
+\subsubsection{三张并列图表（\texttt{chart\_widget.py}）}
+
+使用 \texttt{matplotlib} 的 \texttt{FigureCanvasQTAgg} 嵌入 Qt：
+
+\begin{lstlisting}[style=pystyle]
+class ChartWidget(QWidget):
+    def update_from_rows(self, rows):
+        self.figure.clear()
+        axes = [self.figure.add_subplot(311),
+                self.figure.add_subplot(312),
+                self.figure.add_subplot(313)]
+
+        if not rows:  # 数据为空友好提示
+            for ax in axes:
+                ax.text(0.5, 0.5, "No data",
+                        ha="center", va="center")
+            self.canvas.draw_idle()
+            return
+        # 图表 1: Alarm trigger time
+        ax.plot(xs, ys, marker="o",
+                linestyle="-", color="#ef4444")
+        # 图表 2: NTP delta (ms)
+        ax.bar(xs, ys, width=0.5, color="#22c55e")
+        # 图表 3: Key press heat
+        ax.barh(ypos, values, height=0.6, color="#3b82f6")
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{数据看板图表一览}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{图表} & \textbf{类型} & \textbf{X 轴} & \textbf{Y 轴} & \textbf{数据源} \\
+\midrule
+闹钟触发分布 & 折线图 & 日期 & 小时（0--24） & \texttt{ALARM} 事件 \\
+NTP 误差 & 柱状图 & 日期 & delta（ms） & \texttt{SYNC} 事件 \\
+按键热度 & 条形图 & 按键名 & 按压次数 & \texttt{KEY} 事件 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+%  5. 自主增加功能：专注倒计时系统
+% ============================================================
+\section{自主增加功能：专注倒计时系统}
+
+\subsection{动机}
+
+传统闹钟基于绝对时间触发（如每天 07:00:00 响铃），适用于周期性唤醒场景。但在课堂演示、专注力训练、短时提醒等场景中，用户更需要基于\textbf{相对时长}的倒计时功能。该功能与基础闹钟形成互补：闹钟按绝对时间、倒计时按相对时间，二者独立并行。
+
+\subsection{设计}
+
+\begin{itemize}
+    \item \textbf{PC 侧}：在扩展面板「倒计时」分组框内提供一个 \texttt{QSpinBox}（范围 1--3599 秒，步长 1）和一个「开始倒计时」按钮，点击后下发 \texttt{*SET:COUNTDOWN <seconds>}。
+    \item \textbf{MCU 侧}：接收 \texttt{*SET:COUNTDOWN} 后启动倒计时，期间数码管显示格式为 \texttt{CDMMSS}（如 \texttt{CD0530} 表示 5 分 30 秒），第 4 位小数点常亮作为标志。倒计时归零后，自动复用蜂鸣器驱动（节奏式响铃，最长 10 秒）并上报 \texttt{*EVT:COUNTDOWN\_DONE}。
+    \item \textbf{不新增依赖}：完全复用 MCU 既有的蜂鸣器、显示、LED 和串口事件上报机制。
+\end{itemize}
+
+\subsection{实现}
+
+\textbf{MCU 全局状态：}
+
+\begin{lstlisting}[style=cstyle]
+static bool g_countdown_active = false;
+static uint32_t g_countdown_end_ms = 0;
+\end{lstlisting}
+
+\textbf{MCU 协议入口：}
+
+\begin{lstlisting}[style=cstyle]
+if (Token_Matches(argv[0], "*SET:COUNTDOWN")) {
+    uint16_t sec;
+    if (argc < 2 || !Parse_U16(argv[1], &sec) || sec == 0 || sec > 3599) {
+        UART_PutString("ERROR RANGE\r\n"); return;
+    }
+    g_countdown_end_ms = g_tick_ms + ((uint32_t)sec * 1000U);
+    g_countdown_active = true;
+    UART_PutString("OK\r\n");
+    return;
+}
+\end{lstlisting}
+
+参数范围 1--3599 秒（约 1 小时内），超范围返回 \texttt{ERROR RANGE}；\texttt{Parse\_U16()} 复用基础工具函数，拒绝负数与非数字输入。
+
+\textbf{MCU 显示集成：}
+
+\begin{lstlisting}[style=cstyle]
+// 倒计时进行中 格式 CD MM SS 第 4 位小数点作标志
+if (g_countdown_active) {
+    uint32_t remain_ms = (g_countdown_end_ms > g_tick_ms) ? (g_countdown_end_ms - g_tick_ms) : 0;
+    uint32_t remain_s = (remain_ms + 999U) / 1000U;  // 向上取整到秒
+    snprintf(text, sizeof(text), "CD%02lu%02lu  ",
+             (unsigned long)(remain_s / 60U), (unsigned long)(remain_s % 60U));
+    dp = 0x08;
+    if (remain_s == 0) {
+        // 倒计时归零 转为蜂鸣器响铃 上报事件
+        g_countdown_active = false;
+        g_alarm.ringing = 1;
+        g_alarm_ring_start_ms = g_tick_ms;
+        g_ring_limit_ms = 10000;
+        UART_PutString("*EVT:COUNTDOWN_DONE\r\n");
+    }
+}
+\end{lstlisting}
+
+\textbf{PC 端 UI：}
+
+\begin{lstlisting}[style=pystyle]
+focus_box = QGroupBox("倒计时")
+row = QHBoxLayout(focus_box)
+self.countdown_spin = self.spin(1, 3599, 300)
+row.addWidget(self.countdown_spin)
+row.addWidget(QLabel("秒"))
+row.addStretch(1)
+row.addWidget(self.button("开始倒计时", lambda: self.send_command(f"*SET:COUNTDOWN {self.countdown_spin.value()}")))
+\end{lstlisting}
+
+\subsection{演示}
+
+\begin{enumerate}
+    \item PC 扩展面板「倒计时」分组框中，将 \texttt{QSpinBox} 设为 10（秒）；
+    \item 点击「开始倒计时」；
+    \item S800 板数码管立即显示 \texttt{CD0010}，第 4 位小数点常亮，逐秒递减；
+    \item 10 秒倒计时结束时：
+    \begin{itemize}
+        \item 蜂鸣器节奏式响铃（最长 10 秒自动停止）；
+        \item 数码管自动切回正常时钟显示；
+        \item PC 日志区出现 \texttt{*EVT:COUNTDOWN\_DONE}；
+        \item 数据看板记录该事件。
+    \end{itemize}
+    \item \textbf{关键验证}：倒计时期间闹钟功能独立可用，互不干扰；串口心跳和 PC 镜像面板持续正常刷新。
+\end{enumerate}
+
+% ============================================================
+%  6. 难点解决与防崩溃机制
+% ============================================================
+\section{难点解决与防崩溃机制}
+
+\subsection{难点一：高频心跳包刷屏导致日志卡顿}
+
+\textbf{现象}：串口 1Hz 发送 \texttt{*PONG}、\texttt{*EVT:DISP}、\texttt{*EVT:LED}，\texttt{QPlainTextEdit} 每秒追加 3 行日志，运行 5 分钟后日志行数达到 900+，内存持续增长，滚动卡顿。
+
+\textbf{解决方案}：
+
+\begin{lstlisting}[style=pystyle]
+# main.py
+self.log.setMaximumBlockCount(1000)   # 最多 1000 行，超出丢弃最早行
+
+# protocol.py
+def is_heartbeat(line: str) -> bool:
+    return line.startswith("*PONG") \
+        or line.startswith("*EVT:DISP") \
+        or line.startswith("*EVT:LED")
+
+# main.py
+if self.show_heartbeat.isChecked() or not is_heartbeat(line):
+    self.add_log(kind, f"<- {line}")
+\end{lstlisting}
+
+\textbf{效果}：「显示心跳」复选框（默认关闭）过滤后，日志区仅显示业务事件（闹钟、按键、ERROR），高频心跳包不再干扰。
+
+\subsection{难点二：网络超时导致 UI 假死}
+
+\textbf{现象}：NTP 同步或天气获取时，\texttt{requests.get()} 阻塞 5--10 秒，Qt 事件循环被卡住，窗口无法拖动、按钮无响应。
+
+\textbf{解决方案}：引入 \texttt{NetworkWorker(QThread)}，将网络请求完全移到子线程：
+
+\begin{lstlisting}[style=pystyle]
+class NetworkWorker(QThread):
+    done = pyqtSignal(str, object)
+    failed = pyqtSignal(str, str)
+
+    def run(self):
+        try:
+            if self.kind == "ntp":
+                self.done.emit(self.kind, fetch_network_time())
+            elif self.kind == "weather":
+                self.done.emit(self.kind, fetch_shanghai_weather())
+        except Exception as exc:
+            self.failed.emit(self.kind, str(exc))
+\end{lstlisting}
+
+\textbf{效果}：网络请求期间 GUI 完全流畅，3 台 NTP 服务器自动切换容错。
+
+\subsection{难点三：极端工程边界下的防崩溃设计}
+
+\textbf{全局异常兜底：}
+
+\begin{lstlisting}[style=pystyle]
+def install_excepthook():
+    def hook(exc_type, exc, tb):
+        message = "".join(
+            traceback.format_exception(exc_type, exc, tb))
+        sys.stderr.write(message)
+        try:
+            QMessageBox.critical(None, "意外错误", str(exc))
+        except Exception:
+            pass
+    sys.excepthook = hook
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{异常场景处理表}
+\begin{tabularx}{\textwidth}{cL{4cm}Xl}
+\toprule
+\textbf{\#} & \textbf{场景} & \textbf{处理方式} & \textbf{位置} \\
+\midrule
+1 & 串口被占用 & 弹窗 + 控制关闭 & \texttt{serial\_worker.py} \\
+2 & 写入失败 & break 退出线程 + 连接状态置离线 & \texttt{serial\_worker.py} \\
+3 & MCU 回应 ERROR & 红色日志 + 状态栏显示 & \texttt{main.py} \\
+4 & 协议解析异常 & \texttt{[PARSE ERR]} 红色日志 & \texttt{main.py} \\
+5 & MSG 含非 ASCII & 弹窗警告，不发送 & \texttt{main.py} \\
+6 & 网络超时 & 弹窗 + 红色日志 & \texttt{main.py} \\
+7 & 心跳超时 3s & 指示灯变灰 + 离线状态 & \texttt{main.py} \\
+8 & 未连接时发指令 & 红色日志 \texttt{"not connected"} & \texttt{main.py} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{效果}：上述所有异常场景均被覆盖，GUI 永不闪退。演示时可故意拔 USB、断网、发送错误指令，系统报错而非崩溃。
+
+% ============================================================
+%  7. 相关文件
+% ============================================================
+\section{相关文件}
+
+\begin{table}[H]
+\centering
+\caption{源代码文件索引}
+\begin{tabular}{ll}
+\toprule
+\textbf{组件} & \textbf{路径} \\
+\midrule
+MCU 全部自编代码 & \texttt{mcu/src/main.c}（$\sim$2000 行） \\
+PC 端主程序 & \texttt{pc\_host/main.py}（$\sim$820 行） \\
+串口后台线程 & \texttt{pc\_host/serial\_worker.py}（$\sim$85 行） \\
+协议解析 & \texttt{pc\_host/protocol.py}（$\sim$31 行） \\
+数字孪生面板 & \texttt{pc\_host/twin\_panel.py}（$\sim$210 行） \\
+NTP 对时 & \texttt{pc\_host/ntp\_helper.py}（$\sim$20 行） \\
+天气获取 & \texttt{pc\_host/weather\_helper.py}（$\sim$43 行） \\
+昼夜模式 & \texttt{pc\_host/astral\_helper.py}（$\sim$15 行） \\
+数据看板 & \texttt{pc\_host/chart\_widget.py}（$\sim$118 行） \\
+日志存储 & \texttt{pc\_host/log\_store.py}（$\sim$30 行） \\
+UI 界面布局 & \texttt{pc\_host/ui\_main\_window.py} \\
+UI 源文件 & \texttt{pc\_host/ui/main\_window.ui} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\vfill
+
+\begin{center}
+\rule{8cm}{0.5pt}
+
+\textbf{—— 文档结束 ——}
+
+\vspace{0.3cm}
+智能联网时钟系统 ~$\cdot$~ 嵌入式系统设计 ~$\cdot$~ 大作业简介
+
+\vspace{0.2cm}
+版本：1.0 \hspace{2em} 日期：2026-06-15
+\end{center}
+
+\end{document}
