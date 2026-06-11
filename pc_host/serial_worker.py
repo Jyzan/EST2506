@@ -12,6 +12,11 @@ class SerialWorker(QThread):
     latency_updated = pyqtSignal(int)
     error = pyqtSignal(str)
 
+    # 连续两条命令之间的最小发送间隔(秒)。NTP 对时等场景会一次入队
+    # DATE/TIME/NTP 多条命令, 若背靠背写出, MCU 在粘包边界易丢字节
+    # (表现为 ERROR RANGE/SYNTAX)。逐条限速发送给 MCU 留出整行处理时间。
+    TX_MIN_GAP = 0.02
+
     def __init__(self):
         super().__init__()
         self.port = ""
@@ -19,6 +24,7 @@ class SerialWorker(QThread):
         self._running = False
         self._ser = None
         self._tx = queue.Queue()
+        self._last_tx = 0.0
 
     @staticmethod
     def list_ports():
@@ -59,8 +65,11 @@ class SerialWorker(QThread):
         buf = bytearray()
         while self._running:
             try:
-                while not self._tx.empty():
+                # 逐条限速发送: 每轮最多写一条, 且与上一条间隔 >= TX_MIN_GAP,
+                # 避免多条命令背靠背挤进 MCU 接收链路导致粘包丢字节。
+                if not self._tx.empty() and (time.time() - self._last_tx) >= self.TX_MIN_GAP:
                     self._ser.write(self._tx.get_nowait().encode("ascii", errors="ignore"))
+                    self._last_tx = time.time()
                 chunk = self._ser.read(128)
                 if chunk:
                     buf.extend(chunk)

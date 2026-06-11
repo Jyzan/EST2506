@@ -1,4 +1,5 @@
 astral==3.2
+pywin32>=306
 certifi==2026.5.20
 charset-normalizer==3.4.7
 click==8.4.1
@@ -20,6 +21,7 @@ PyQt5-Qt5==5.15.2
 pyqt5-tools==5.15.9.3.3
 PyQt5_sip==12.18.0
 pyserial==3.5
+pyttsx3==2.99
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 qt5-applications==5.15.2.2.3

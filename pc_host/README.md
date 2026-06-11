@@ -326,23 +326,24 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A["用户点击虚拟按键"] --> B{"pressed + QTimer"}
-    B -->|"短按 < 800ms"| C["on_virtual_key(name)"]
-    B -->|"长按 >= 800ms"| D["on_virtual_long_key(name)"]
-    C --> E["send_command('*SET:KEY ' + name)"]
-    D --> E
-    E --> F["MCU 等效物理按键效果"]
+    A["用户点击虚拟按键"] --> B["HoldButton.mousePressEvent<br/>记录 time.time() + 蓝色高亮"]
+    B --> C["HoldButton.mouseReleaseEvent<br/>elapsed = time.time() - press_time"]
+    C -->|"elapsed < 0.8s"| D["on_virtual_key(name)"]
+    C -->|"elapsed >= 0.8s"| E["on_virtual_long_key(name)"]
+    D --> F["send_command('*SET:KEY ' + name)"]
+    E --> F
+    F --> G["MCU 等效物理按键效果"]
 
-    G["长按特化"] -.- H["FUNC → *SET:KEY SAVE"]
-    G -.- I["ADD → 200/400ms 连发 3 次"]
-    G -.- J["USER1 → *SET:KEY USER1"]
+    H["长按特化"] -.- I["FUNC → *SET:KEY SAVE"]
+    H -.- J["ADD → 200/400ms 连发 3 次"]
+    H -.- K["USER1 → *SET:KEY USER1"]
 ```
 
 | 机制 | 实现 |
 |------|------|
-| **短按** | `released` 信号 + 800ms 内未触发长按 |
-| **长按** | `pressed` 后 `QTimer.singleShot(800ms)` → `key_long` 信号 |
-| **高亮反馈** | `pulse_key()` → QSS `background: #2563eb` 持续 200ms |
+| **短按** | `HoldButton.mouseReleaseEvent` 中 `elapsed < 0.8` → `short_clicked` 信号 |
+| **长按** | `HoldButton.mouseReleaseEvent` 中 `elapsed >= 0.8` → `hold_triggered` 信号 |
+| **高亮反馈** | 按下时 `_set_pulse(True)` 蓝色高亮，松开 `_set_pulse(False)` 恢复；`pulse_key()` 供 `*EVT:KEY` 200ms 脉冲 |
 | **防环回** | 虚拟按键下行 `*SET:KEY` 后 MCU 不回报 `*EVT:KEY` |
 | **FORMAT 特殊处理** | 虚拟按键 FORMAT 后主动补 `*GET:FORMAT` 更新状态栏 |
 | **USER1 特殊处理** | 短按 USER1 → PC 直接发起 NTP 对时（不下发 `*SET:KEY`） |
@@ -523,11 +524,11 @@ flowchart TD
     A["上海经纬度<br/>(31.23°N, 121.47°E)<br/>时区 Asia/Shanghai"] --> B["Astral sun()"]
     B --> C1["sunrise<br/>日出时刻 (如 04:51)"]
     B --> C2["sunset<br/>日落时刻 (如 18:56)"]
-    C1 --> D{"QTimer 每分钟检查<br/>now 是否在 [sunrise, sunset) 内?"}
+    C1 --> D{"手动: *GET:TIME 获取 MCU 时间<br/>定时: PC 本地时间"}
     C2 --> D
-    D -->|"是"| E["*SET:MODE DAY"]
+    D -->|"在 [sunrise, sunset) 内"| E["*SET:MODE DAY"]
     D -->|"否"| F["*SET:MODE NIGHT"]
-    E --> G["UI 控件<br/>☑ 自动昼夜模式 默认开启<br/>强制白天 / 强制夜间"]
+    E --> G["UI 控件<br/>☑ 自动昼夜模式 默认开启<br/>强制白天 / 强制夜间 / 应用昼夜"]
     F --> G
 ```
 

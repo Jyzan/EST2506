@@ -1,8 +1,40 @@
+import time
+
 from PyQt5.QtCore import Qt, QRectF, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QBrush
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel, QSizePolicy
+from PyQt5.QtGui import QColor, QPainter, QBrush, QPen, QFont
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel, QSizePolicy, QFrame
 
 from protocol import display_key_name, normalize_key_name
+
+
+class HoldButton(QPushButton):
+    """Button that distinguishes short clicks from long presses via mouse events.
+    Uses elapsed time on release, avoiding QTimer unreliability while held."""
+    hold_triggered = pyqtSignal()
+    short_clicked = pyqtSignal()
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self._press_time = 0.0
+
+    def _set_pulse(self, on):
+        self.setProperty("pulse", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event):
+        self._press_time = time.time()
+        self._set_pulse(True)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        elapsed = time.time() - self._press_time
+        self._set_pulse(False)
+        super().mouseReleaseEvent(event)
+        if elapsed >= 0.8:
+            self.hold_triggered.emit()
+        else:
+            self.short_clicked.emit()
 
 
 class SevenSegmentDigit(QWidget):
@@ -25,7 +57,7 @@ class SevenSegmentDigit(QWidget):
         "O": "cdeg", "P": "abfeg", "Q": "abcfg", "R": "eg",
         "S": "fgc", "T": "fged", "U": "bcdef", "V": "fbg",
         "W": "fbgd", "X": "fbec", "Y": "fbgcd", "Z": "agd",
-        "-": "g", "_": "d", " ": ""
+        "-": "g", "_": "d", "~": "abfg", " ": ""
     }
 
     def __init__(self):
@@ -120,17 +152,15 @@ class TwinPanel(QWidget):
     LED_HINTS = ["HB", "ALM", "EDIT", "RX/TX", "SUN", "RAI/SNO", "HOT", "NTP"]
     KEY_LAYOUT = [
         ("FUNC", "FUNC"), ("SHFT", "SHIFT"), ("ADD", "ADD"), ("SAVE", "SAVE"),
-        ("DISP", "DISP"), ("SPEED", "SPEED"), ("USR1", "USER1"), ("USR2", "USER2"),
-        ("FORMAT", "FORMAT"), ("EXT", "EXT"),
+        ("DISP", "DISP"), ("SPEED", "SPEED"), ("FORMAT", "FORMAT"), ("EXT", "EXT"),
     ]
+    GPIO_KEYS = [("USR1", "USER1"), ("USR2", "USER2")]
 
     def __init__(self):
         super().__init__()
         self.digits = []
         self.leds = []
         self.buttons = {}
-        self._pressed = {}
-        self._long_sent = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -156,16 +186,39 @@ class TwinPanel(QWidget):
         key_grid.setHorizontalSpacing(6)
         key_grid.setVerticalSpacing(6)
         for idx, (label, name) in enumerate(self.KEY_LAYOUT):
-            btn = QPushButton(label)
+            btn = HoldButton(label)
             btn.setMinimumHeight(26)
             btn.setMinimumWidth(0)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setProperty("pulse", False)
-            btn.pressed.connect(lambda n=name: self._on_pressed(n))
-            btn.released.connect(lambda n=name: self._on_released(n))
+            btn.short_clicked.connect(lambda n=name: self.key_clicked.emit(n))
+            btn.hold_triggered.connect(lambda n=name: self.key_long.emit(n))
             self.buttons[name] = btn
             key_grid.addWidget(btn, idx // 4, idx % 4)
         layout.addLayout(key_grid)
+
+        # GPIO USER1 USER2 with visual separation from I2C keys
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("QFrame { color: #374151; }")
+        layout.addWidget(sep)
+
+        gpio_row = QHBoxLayout()
+        gpio_row.setSpacing(6)
+        for label, name in self.GPIO_KEYS:
+            btn = HoldButton(label)
+            btn.setMinimumHeight(26)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setProperty("pulse", False)
+            btn.setStyleSheet("QPushButton { background: #1a2740; border: 1px solid #3b82f6; border-radius: 4px; padding: 6px 8px; }"
+                             "QPushButton:hover { background: #243860; }"
+                             "QPushButton[pulse=\"true\"] { background: #2563eb; border-color: #93c5fd; }")
+            btn.short_clicked.connect(lambda n=name: self.key_clicked.emit(n))
+            btn.hold_triggered.connect(lambda n=name: self.key_long.emit(n))
+            self.buttons[name] = btn
+            gpio_row.addWidget(btn)
+        layout.addLayout(gpio_row)
 
         layout.addStretch(1)
 
@@ -192,17 +245,71 @@ class TwinPanel(QWidget):
         btn.style().unpolish(btn)
         btn.style().polish(btn)
 
-    def _on_pressed(self, name: str):
-        self._pressed[name] = True
-        self._long_sent[name] = False
-        QTimer.singleShot(850, lambda n=name: self._emit_long(n))
 
-    def _on_released(self, name: str):
-        if self._pressed.get(name) and not self._long_sent.get(name):
-            self.key_clicked.emit(name)
-        self._pressed[name] = False
+class CountdownRing(QWidget):
+    """情景倒计时进度环: 圆弧进度 + 中心剩余 MM:SS + 状态文字。
 
-    def _emit_long(self, name: str):
-        if self._pressed.get(name):
-            self._long_sent[name] = True
-            self.key_long.emit(name)
+    与 S800 板 *EVT:CD 状态联动, 进度按 remain/total 渲染。
+    """
+
+    STATE_TEXT = {
+        "IDLE": "空闲", "EDIT": "板上编辑中", "RUN": "运行中",
+        "PAUSE": "已暂停", "DONE": "时间到!",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.state = "IDLE"
+        self.remain = 0
+        self.total = 1
+        self.scene = 0
+        self.setMinimumSize(180, 180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def update_state(self, state: str, remain: int, total: int, scene: int):
+        self.state = state
+        self.remain = max(0, remain)
+        self.total = max(1, total)
+        self.scene = scene
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        side = min(w, h) - 16
+        x = (w - side) / 2
+        y = (h - side) / 2
+        rect = QRectF(x, y, side, side)
+
+        # 底环
+        p.setPen(QPen(QColor("#374151"), 12, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 0, 360 * 16)
+
+        # 进度弧: 剩余占比, 从 12 点钟方向顺时针递减
+        frac = self.remain / self.total if self.total else 0
+        if self.state in ("RUN", "PAUSE", "EDIT"):
+            color = "#22c55e" if self.state == "RUN" else ("#fbbf24" if self.state == "PAUSE" else "#60a5fa")
+            span = int(-360 * frac * 16)
+            p.setPen(QPen(QColor(color), 12, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(rect, 90 * 16, span)
+        elif self.state == "DONE":
+            p.setPen(QPen(QColor("#ef4444"), 12, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(rect, 0, 360 * 16)
+
+        # 中心剩余时间 MM:SS
+        mm, ss = self.remain // 60, self.remain % 60
+        p.setPen(QColor("#e5e7eb"))
+        big = QFont()
+        big.setPointSize(max(14, int(side / 6)))
+        big.setBold(True)
+        p.setFont(big)
+        p.drawText(rect, Qt.AlignCenter, f"{mm:02d}:{ss:02d}")
+
+        # 状态文字
+        small = QFont()
+        small.setPointSize(11)
+        p.setFont(small)
+        p.setPen(QColor("#9ca3af"))
+        label = self.STATE_TEXT.get(self.state, self.state)
+        p.drawText(QRectF(x, y + side * 0.66, side, 24), Qt.AlignCenter, label)

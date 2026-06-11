@@ -16,9 +16,12 @@ from astral_helper import current_daynight
 from chart_widget import ChartWidget
 from log_store import EventStore
 from ntp_helper import fetch_network_time
-from protocol import is_heartbeat, parse_disp_event, parse_led_event
+from protocol import (
+    is_heartbeat, parse_disp_event, parse_led_event,
+    parse_cd_event, parse_cd_status_payload
+)
 from serial_worker import SerialWorker
-from twin_panel import TwinPanel
+from twin_panel import TwinPanel, CountdownRing
 from ui_main_window import Ui_MainWindow
 from weather_helper import fetch_shanghai_weather
 
@@ -55,6 +58,113 @@ class NetworkWorker(QThread):
             self.failed.emit(self.kind, str(exc))
 
 
+class TtsSpeaker:
+    """离线语音播报封装: 惰性导入 pyttsx3, 后台线程朗读不阻塞 GUI。
+
+    库缺失或初始化失败时静默降级(available=False), 调用方仅记日志不崩溃。
+    """
+
+    def __init__(self):
+        self.available = False
+        self._engine = None
+        self._lock = None
+        self._sapi_queue = None
+        try:
+            import importlib.util
+            import queue
+            import threading
+            # 仅探测依赖是否可导入。pyttsx3 在部分 Windows SAPI 默认语音损坏时
+            # 会初始化失败，因此保留 win32com 直连 SAPI 作为备用通道。
+            has_win32com = importlib.util.find_spec("win32com") is not None
+            has_pyttsx3 = importlib.util.find_spec("pyttsx3") is not None
+            self._lock = threading.Lock()
+            if has_win32com:
+                self._sapi_queue = queue.Queue()
+                threading.Thread(target=self._sapi_worker, daemon=True).start()
+                self.available = True
+            elif has_pyttsx3:
+                self.available = True
+        except Exception:
+            self.available = False
+
+    def _ensure_engine(self):
+        if self._engine is not None:
+            return self._engine
+        import pyttsx3   # 惰性导入, 缺库则抛出由 say() 捕获
+        self._engine = pyttsx3.init()
+        return self._engine
+
+    def say(self, text: str) -> bool:
+        """后台线程朗读 text。成功调度返回 True, 失败(库缺失等)返回 False。"""
+        if not self.available:
+            return False
+        if self._sapi_queue is not None:
+            try:
+                self._sapi_queue.put_nowait(str(text))
+                return True
+            except Exception:
+                return False
+
+        import threading
+
+        def _run():
+            try:
+                with self._lock:
+                    engine = self._ensure_engine()
+                    engine.say(text)
+                    engine.runAndWait()
+            except Exception:
+                # 引擎不可用 标记降级 避免反复重试
+                self.available = False
+
+        try:
+            threading.Thread(target=_run, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def _sapi_worker(self):
+        """单独线程内初始化并复用 Windows SAPI，避免每个数字重建语音对象。"""
+        try:
+            import pythoncom
+            from win32com.client import Dispatch
+        except Exception:
+            self.available = False
+            return
+
+        pythoncom.CoInitialize()
+        try:
+            speaker = Dispatch("SAPI.SpVoice")
+            voices = speaker.GetVoices()
+            chosen = None
+            for i in range(voices.Count):
+                token = voices.Item(i)
+                name = token.GetDescription()
+                if "Zira" in name or "English" in name:
+                    chosen = token
+                    break
+                if chosen is None:
+                    chosen = token
+            if chosen is not None:
+                speaker.Voice = chosen
+            speaker.Rate = 4
+            speaker.Volume = 100
+            while True:
+                text = self._sapi_queue.get()
+                while not self._sapi_queue.empty():
+                    text = self._sapi_queue.get_nowait()
+                try:
+                    # Async + purge: countdown speech must track the latest second,
+                    # not wait behind older utterances.
+                    speaker.Speak(str(text), 3)
+                except Exception:
+                    self.available = False
+        except Exception:
+            self.available = False
+        finally:
+            pythoncom.CoUninitialize()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -68,6 +178,13 @@ class MainWindow(QMainWindow):
         self.last_pong_time = 0.0
         self.store = EventStore("events.csv")
         self.log_lines = 0
+        self.tts = TtsSpeaker()
+        self.cd_state = "IDLE"
+        self.cd_scene = 0          # 跟踪当前情景(可能被板上 EXT 编辑改变)
+        self.cd_last_spoken = -1   # 上次语音播报的剩余秒 避免重复念
+        self._cd_ring_timer = QTimer(self)
+        self._cd_ring_timer.timeout.connect(self._cd_ring_tick)
+        self._pending_daynight = False
 
         self.build_ui()
         self.refresh_ports()
@@ -291,7 +408,7 @@ class MainWindow(QMainWindow):
         btn_grid.addWidget(self.button("NTP 对时", self.ntp_sync), 0, 0)
         btn_grid.addWidget(self.button("立即更新", self.fetch_weather), 0, 1)
         btn_grid.addWidget(self.auto_mode_check, 1, 0)
-        btn_grid.addWidget(self.button("应用昼夜", self.auto_daynight), 1, 1)
+        btn_grid.addWidget(self.button("应用昼夜", self.apply_daynight), 1, 1)
         btn_grid.addWidget(self.button("强制白天", lambda: self.force_mode("DAY")), 2, 0)
         btn_grid.addWidget(self.button("强制夜间", lambda: self.force_mode("NIGHT")), 2, 1)
         top_row.addWidget(btn_box, 1, Qt.AlignVCenter)
@@ -305,16 +422,94 @@ class MainWindow(QMainWindow):
         net_layout.addLayout(info_row)
         layout.addWidget(net_box)
 
-        focus_box = QGroupBox("倒计时")
-        row = QHBoxLayout(focus_box)
-        self.countdown_spin = self.spin(1, 3599, 300)
-        row.addWidget(self.countdown_spin)
-        row.addWidget(QLabel("秒"))
-        row.addStretch(1)
-        row.addWidget(self.button("开始倒计时", lambda: self.send_command(f"*SET:COUNTDOWN {self.countdown_spin.value()}")))
-        layout.addWidget(focus_box)
+        layout.addWidget(self.build_countdown_box())
         layout.addStretch(1)
         return w
+
+    def build_countdown_box(self):
+        box = QGroupBox("情景倒计时")
+        outer = QHBoxLayout(box)
+
+        # 左: 进度环
+        self.countdown_ring = CountdownRing()
+        outer.addWidget(self.countdown_ring, 1)
+
+        # 右: 控制
+        ctrl = QVBoxLayout()
+
+        dur_row = QHBoxLayout()
+        dur_row.addWidget(QLabel("时长"))
+        self.cd_min_spin = self.spin(0, 59, 5)
+        self.cd_sec_spin = self.spin(0, 59, 0)
+        dur_row.addWidget(self.cd_min_spin)
+        dur_row.addWidget(QLabel("分"))
+        dur_row.addWidget(self.cd_sec_spin)
+        dur_row.addWidget(QLabel("秒"))
+        dur_row.addStretch(1)
+        ctrl.addLayout(dur_row)
+
+        scene_row = QHBoxLayout()
+        scene_row.addWidget(QLabel("情景"))
+        self.cd_scene_combo = QComboBox()
+        self.cd_scene_combo.addItems(["滚动文本", "闪烁庆祝", "静默"])
+        self.cd_scene_combo.currentIndexChanged.connect(
+            lambda i: self.send_command(f"*SET:COUNTDOWN SCENE {i}"))
+        scene_row.addWidget(self.cd_scene_combo, 1)
+        ctrl.addLayout(scene_row)
+
+        msg_row = QHBoxLayout()
+        msg_row.addWidget(QLabel("文本"))
+        self.cd_msg_edit = QLineEdit("CONGRATULATIONS")
+        self.cd_msg_edit.setMaxLength(32)
+        msg_row.addWidget(self.cd_msg_edit, 1)
+        msg_row.addWidget(self.button("下发", self.cd_send_msg))
+        ctrl.addLayout(msg_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.button("开始", self.cd_start))
+        self.cd_pause_btn = self.button("暂停", self.cd_toggle_pause)
+        btn_row.addWidget(self.cd_pause_btn)
+        btn_row.addWidget(self.button("停止", lambda: self.send_command("*SET:COUNTDOWN STOP")))
+        ctrl.addLayout(btn_row)
+
+        self.cd_voice_check = QCheckBox("语音播报")
+        self.cd_voice_check.setChecked(True)
+        if not self.tts.available:
+            self.cd_voice_check.setEnabled(False)
+            self.cd_voice_check.setText("语音播报 (不可用)")
+        ctrl.addWidget(self.cd_voice_check)
+        ctrl.addStretch(1)
+
+        outer.addLayout(ctrl, 1)
+        return box
+
+    def cd_send_msg(self):
+        self.cd_scene_combo.blockSignals(True)
+        self.cd_scene_combo.setCurrentIndex(0)
+        self.cd_scene_combo.blockSignals(False)
+        self.cd_scene = 0
+        self.send_command("*SET:COUNTDOWN SCENE 0")
+        self.send_command(f"*SET:COUNTDOWN MSG {self.cd_msg_edit.text()}")
+
+    def cd_start(self):
+        total = self.cd_min_spin.value() * 60 + self.cd_sec_spin.value()
+        if total <= 0:
+            QMessageBox.warning(self, "倒计时", "时长必须大于 0 秒。")
+            return
+        self.cd_last_spoken = -1
+        scene = self.cd_scene_combo.currentIndex()
+        self.cd_scene = scene
+        self.send_command(f"*SET:COUNTDOWN SCENE {scene}")
+        if scene == 0:
+            self.send_command(f"*SET:COUNTDOWN MSG {self.cd_msg_edit.text()}")
+        self.send_command(f"*SET:COUNTDOWN TIME {total}")
+        self.send_command("*SET:COUNTDOWN START")
+
+    def cd_toggle_pause(self):
+        if self.cd_state == "RUN":
+            self.send_command("*SET:COUNTDOWN PAUSE")
+        elif self.cd_state == "PAUSE":
+            self.send_command("*SET:COUNTDOWN RESUME")
 
     WEATHER_ICONS = {
         "SUN": "☀", "CLD": "⛅", "OVC": "☁",
@@ -455,8 +650,10 @@ class MainWindow(QMainWindow):
             self.last_pong_time = time.time()
             self.send_command("*GET:FORMAT")
             self.send_command("*GET:ALARM")
+            self.send_command("*GET:COUNTDOWN")
         else:
             self.heartbeat_timer.stop()
+            self._cd_ring_timer.stop()
             self.latency_label.setText("延迟: -- ms")
         self.update_connection_led()
         self.update_status()
@@ -550,6 +747,9 @@ class MainWindow(QMainWindow):
             self.twin.update_leds(parse_led_event(line))
             self.store.append("LED", line.split()[-1])
             return
+        if line.startswith("*EVT:CD"):
+            self.handle_cd_event(line)
+            return
         if line.startswith("*EVT:KEY"):
             name = line.split()[-1]
             self.twin.pulse_key(name)
@@ -588,6 +788,10 @@ class MainWindow(QMainWindow):
             return
         payload = parts[1].strip()
         upper = payload.upper()
+        cd_status = parse_cd_status_payload(payload)
+        if cd_status:
+            self.apply_cd_status(*cd_status)
+            return
         # FORMAT 应答: RIGHT 模式下 MCU 会把 LEFT/RIGHT 逆序成 TFEL/THGIR.
         # 此时 PC 可能尚未同步 FORMAT(首连引导), 故两种朝向都识别.
         if upper in ("LEFT", "TFEL"):
@@ -603,6 +807,12 @@ class MainWindow(QMainWindow):
         # 其它 *GET 应答: 文档规定 RIGHT 模式下整串逆序, 按当前已知 FORMAT 还原.
         if self.state.fmt == "RIGHT":
             payload = payload[::-1]
+        # TIME 应答 HH.MM.SS 用于昼夜判断
+        if self._pending_daynight:
+            parts_dot = payload.split(".")
+            if len(parts_dot) == 3 and all(len(p) == 2 and p.isdigit() for p in parts_dot):
+                self._pending_daynight = False
+                self._do_apply_daynight(int(parts_dot[0]), int(parts_dot[1]))
         tokens = payload.split()
         if len(tokens) == 1 and len(tokens[0]) == 2 and all(c in "0123456789ABCDEF" for c in tokens[0].upper()):
             self.twin.update_leds(int(tokens[0], 16))
@@ -615,6 +825,56 @@ class MainWindow(QMainWindow):
             # *GET:DISPLAY, 不能用来更新闹钟状态, 否则首连查询显示会误置闹钟为 ON.
             self.state.alarm = tokens[-1].upper()
             self.update_status()
+
+    def _cd_ring_tick(self):
+        """兜底递减: MCU 的 1Hz STATE 丢失时才临时推进一次。"""
+        remain = max(0, self.countdown_ring.remain - 1)
+        self.countdown_ring.update_state("RUN", remain, self.countdown_ring.total, self.cd_scene)
+        # 本地语音倒数
+        if 1 <= remain <= 5 and remain != self.cd_last_spoken:
+            self.cd_last_spoken = remain
+            if self.cd_voice_check.isChecked():
+                self.tts.say(str(remain))
+
+    def handle_cd_event(self, line: str):
+        body = line[len("*EVT:CD"):].strip()
+        if body == "DONE":
+            self._cd_ring_timer.stop()
+            self.cd_state = "DONE"
+            self.store.append("CD", "DONE")
+            self.countdown_ring.update_state("DONE", 0, self.countdown_ring.total, self.cd_scene)
+            if self.cd_voice_check.isChecked():
+                if self.cd_scene == 0:
+                    self.tts.say(self.cd_msg_edit.text().lower())
+                else:
+                    self.tts.say("time is up")
+            self.cd_last_spoken = -1
+            return
+        parsed = parse_cd_event(line)
+        if not parsed:
+            return
+        self.apply_cd_status(*parsed)
+
+    def apply_cd_status(self, state: str, remain: int, total: int, scene: int):
+        self.cd_state = state
+        self.cd_scene = scene
+        if scene != self.cd_scene_combo.currentIndex():
+            self.cd_scene_combo.blockSignals(True)
+            self.cd_scene_combo.setCurrentIndex(scene)
+            self.cd_scene_combo.blockSignals(False)
+        self.countdown_ring.update_state(state, remain, total, scene)
+        self.cd_pause_btn.setText("继续" if state == "PAUSE" else "暂停")
+        # RUN 态以 MCU 每秒 STATE 为主; 本地定时器只作 1.2s 无事件兜底。
+        if state == "RUN":
+            if 1 <= remain <= 5 and remain != self.cd_last_spoken:
+                self.cd_last_spoken = remain
+                if self.cd_voice_check.isChecked():
+                    self.tts.say(str(remain))
+            elif remain > 5:
+                self.cd_last_spoken = remain
+            self._cd_ring_timer.start(1200)
+        else:
+            self._cd_ring_timer.stop()
 
     def add_log(self, kind: str, text: str, popup=False):
         colors = {"TX": "#0064C8", "RX": "#009600", "EVT": "#8A2BE2", "ERR": "#C80000", "SYS": "#888888"}
@@ -703,15 +963,22 @@ class MainWindow(QMainWindow):
         self.auto_mode_check.setChecked(False)
         self.send_command(f"*SET:MODE {mode}")
 
-    def auto_daynight(self):
-        if not self.auto_mode_check.isChecked():
-            return
+    def apply_daynight(self):
+        self._pending_daynight = True
+        self.send_command("*GET:TIME")
+
+    def _do_apply_daynight(self, hour: int, minute: int):
         try:
-            mode, sunrise, sunset = current_daynight()
+            mode, sunrise, sunset = current_daynight(hour=hour, minute=minute)
             self.sun_label.setText(f"日升 / 日落: {sunrise:%H:%M} / {sunset:%H:%M}")
             self.send_command(f"*SET:MODE {mode}")
         except Exception as exc:
             self.add_log("ERR", f"day/night failed: {exc}")
+
+    def auto_daynight(self):
+        if not self.auto_mode_check.isChecked():
+            return
+        self.apply_daynight()
 
     def refresh_chart(self):
         self.chart.update_from_rows(self.store.rows())

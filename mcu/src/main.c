@@ -129,14 +129,25 @@ static uint8_t g_edit_field = 0;
 static uint32_t g_edit_last_ms = 0;
 static bool g_blink_on = true;
 
-static char g_weather_text[17] = "--C---";
+static char g_weather_text[17] = "--~C---";
 static int8_t g_weather_temp = 0;
 static uint8_t g_weather_code = WEATHER_CLD;
 static bool g_weather_valid = false;
 static uint32_t g_weather_update_ms = 0;
 static uint32_t g_weather_until_ms = 0;
-static bool g_countdown_active = false;
-static uint32_t g_countdown_end_ms = 0;
+// ---- §自主功能 情景倒计时 状态机 ----
+typedef enum { CD_IDLE, CD_EDIT, CD_RUN, CD_PAUSE, CD_DONE } cd_state_t;
+static cd_state_t g_cd_state = CD_IDLE;
+static uint16_t g_cd_total_s = 300;            // 设定总时长(秒) 1-3599
+static uint16_t g_cd_remain_s = 0;             // 剩余秒 支持暂停 在 Time_Tick_1s 中递减
+static uint8_t  g_cd_min = 5;                  // 编辑分(0-59)
+static uint8_t  g_cd_sec = 0;                  // 编辑秒(0-59)
+static uint8_t  g_cd_field = 0;                // 编辑字段 0=分 1=秒 2=情景
+static uint8_t  g_cd_scene = 0;                // 情景 0=滚动文本 1=闪烁庆祝 2=静默
+static char     g_cd_msg[33] = "CONGRATULATIONS";  // 到点滚动文本 默认值 由 PC UI 下发覆盖 保留大小写
+static char     g_cd_active_msg[33] = "CONGRATULATIONS";
+static uint32_t g_cd_done_ms = 0;              // DONE 情景起始时刻 超时兜底
+static const char *CD_STATE_NAMES[5] = {"IDLE", "EDIT", "RUN", "PAUSE", "DONE"};
 
 // ============================ §2 数码管显示状态 ============================
 uint8_t disp_buf[DISP_LEN];           // 每位显示的 ASCII 字符
@@ -187,6 +198,7 @@ static uint32_t g_key_press_ms[KEY_COUNT];
 static uint32_t g_key_repeat_ms[KEY_COUNT];
 static bool g_func_armed = false;           // 编辑中按下 FUNC 暂不处理 等抬起/长按再决定
 static bool g_user1_armed = false;
+static bool g_ext_armed = false;            // EXT 短按启动/暂停 长按停止 等抬起/长按再决定
 
 #define KEY_EVQ_SIZE 16U
 static key_code_t g_evq_code[KEY_EVQ_SIZE];
@@ -241,11 +253,17 @@ static bool Parse_U8(const char *s, uint8_t *out);
 static bool Parse_U16(const char *s, uint16_t *out);
 static void Upper_Copy(char *dst, const char *src, uint16_t max);
 static bool Token_Matches(const char *token, const char *pattern);
+static bool Command_Matches(const char *token, const char *pattern);
 static uint8_t Days_In_Month(uint16_t year, uint8_t month);
 static void Normalize_Date(void);
 static void Calc_Wday(date_t *d);
 static void Send_OK_Value(const char *value);
 static void Show_Ntp_Status(void);
+static bool Countdown_HandleKey(key_code_t key);
+static void Send_CD_Event(void);
+static void Countdown_Start(void);
+static void Countdown_Stop(void);
+static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc);
 static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms);
 
 /* §1 SysTick 每 1ms 触发一次 递增全局节拍计数器并设置各时间片标志位。
@@ -302,6 +320,13 @@ void UART0_Handler(void)
     UARTIntClear(UART0_BASE, status);
 
     if (status & (UART_INT_RX | UART_INT_RT)) {
+        // 检测帧错误与接收溢出等硬件错误 出现时作废当前组装中的行
+        // 防止被破坏的字节拼入命令 等待下一个回车换行重新同步
+        if (UARTRxErrorGet(UART0_BASE) != 0U) {
+            UARTRxErrorClear(UART0_BASE);
+            g_rx_asm_len = 0;
+            g_rx_asm_ovf = true;
+        }
         while (UARTCharsAvail(UART0_BASE)) {
             int32_t ch = UARTCharGetNonBlocking(UART0_BASE);
             if (ch >= 0) UART_RxIsrHandler((uint8_t)ch);
@@ -335,20 +360,22 @@ static void UART_RxIsrHandler(uint8_t byte)
         }
         if (g_rx_asm_len == 0) return;   // 忽略空行
         Mark_Serial_Activity();
-        for (i = 0; i < g_rx_asm_len; i++) {
-            uint16_t next = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
-            if (next != g_rx_tail) {
-                g_rx_ring[g_rx_head] = g_rx_asm[i];
-                g_rx_head = next;
-            }
-        }
         {
-            uint16_t next = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
-            if (next != g_rx_tail) {
-                g_rx_ring[g_rx_head] = '\n';
-                g_rx_head = next;
+            // 先确认环形缓冲能容纳整行连同行尾换行符 容不下则整行丢弃
+            // 杜绝写入半行或漏写换行符却仍递增行计数导致后续命令永久错位
+            uint16_t used = (uint16_t)((g_rx_head - g_rx_tail + RX_RING_SIZE) % RX_RING_SIZE);
+            uint16_t free_slots = (uint16_t)(RX_RING_SIZE - 1U - used);
+            if (free_slots < (uint16_t)(g_rx_asm_len + 1U)) {
+                g_rx_asm_len = 0;
+                return;
             }
         }
+        for (i = 0; i < g_rx_asm_len; i++) {
+            g_rx_ring[g_rx_head] = g_rx_asm[i];
+            g_rx_head = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
+        }
+        g_rx_ring[g_rx_head] = '\n';
+        g_rx_head = (uint16_t)((g_rx_head + 1U) % RX_RING_SIZE);
         rx_line_ready++;
         g_rx_asm_len = 0;
         return;
@@ -373,13 +400,22 @@ static bool UART_GetLine(char *out, uint16_t max)
         g_rx_tail = (uint16_t)((g_rx_tail + 1U) % RX_RING_SIZE);
         if (c == '\n') {
             out[len] = '\0';
+            // 关串口中断保护行计数自减 避免与中断中的自增形成读改写竞争丢更新
+            IntDisable(INT_UART0);
             if (rx_line_ready) rx_line_ready--;
+            IntEnable(INT_UART0);
             return true;
         }
         if (len < max - 1U) out[len++] = c;
     }
-    out[len] = '\0';
-    return len > 0;
+    // 扫到环底仍无换行符 说明行计数与缓冲内容失配 丢弃残缺字节并清零计数
+    // 让接收链路重新同步 而不是把不完整的命令交给解析器
+    out[0] = '\0';
+    IntDisable(INT_UART0);
+    rx_line_ready = 0;
+    g_rx_tail = g_rx_head;
+    IntEnable(INT_UART0);
+    return false;
 }
 
 int main(void)
@@ -842,6 +878,7 @@ static uint8_t SegCode(char c)
         case 'Z': return 0x49;
         case '-': return 0x40;
         case '_': return 0x08;
+        case '~': return 0x63;   // 度符号 上方四段 a+b+f+g
         default: return 0x00;
     }
 }
@@ -989,38 +1026,80 @@ static void Build_Display(void)
     uint8_t dp = 0;
     uint8_t i;
 
-    // 显示优先级从高到低 倒计时 > 天气短显 > 消息/流水 > 时钟
-    if (g_countdown_active) {
-        // 倒计时进行中 格式 CD MM SS 第 4 位小数点作标志
-        uint32_t remain_ms = (g_countdown_end_ms > g_tick_ms) ? (g_countdown_end_ms - g_tick_ms) : 0;
-        uint32_t remain_s = (remain_ms + 999U) / 1000U;  // 向上取整到秒
-        snprintf(text, sizeof(text), "CD%02lu%02lu  ",
-                 (unsigned long)(remain_s / 60U), (unsigned long)(remain_s % 60U));
-        dp = 0x08;
-        if (remain_s == 0) {
-            // 倒计时归零 转为蜂鸣器响铃 上报事件
-            g_countdown_active = false;
-            g_alarm.ringing = 1;
-            g_alarm_ring_start_ms = g_tick_ms;
-            g_ring_limit_ms = 10000;
-            UART_PutString("*EVT:COUNTDOWN_DONE\r\n");
-        }
+    // 显示优先级从高到低 情景倒计时 > 天气短显 > 消息/流水 > 时钟
+    // 倒计时逻辑直接内联 避免额外函数调用栈压(与旧 countdown 同模)
+    if (g_cd_state != CD_IDLE) {
+        // ---- 情景倒计时显示 (内联) ----
+        if (g_cd_state == CD_EDIT) {
+            uint8_t cd_mm, cd_ss;
+            char cd_base[9];
+            cd_mm = g_cd_min; cd_ss = g_cd_sec;
+            if (g_cd_field == 2) {
+                text[0]='C'; text[1]='d'; text[2]=' '; text[3]=' ';
+                text[4]='S'; text[5]='C';
+                text[6]=(uint8_t)('0'+g_cd_scene); text[7]=' '; text[8]='\0'; dp=0x00;
+            } else {
+                text[0]='C'; text[1]='d';
+                text[2]=(uint8_t)('0'+cd_mm/10U); text[3]=(uint8_t)('0'+cd_mm%10U);
+                text[4]=(uint8_t)('0'+cd_ss/10U); text[5]=(uint8_t)('0'+cd_ss%10U);
+                text[6]=' '; text[7]=' '; text[8]='\0'; dp=0x08;
+            }
+            for(i=0;i<8;i++)cd_base[i]=text[i]?text[i]:' ';cd_base[8]='\0';
+            if(!g_blink_on){uint8_t st=(uint8_t)(2U+g_cd_field*2U);cd_base[st]=' ';cd_base[st+1]=' ';}
+            // RIGHT 镜像还原
+            if(g_format==FMT_RIGHT){char rev[9];uint8_t rdp=0;uint8_t j;
+                for(j=0;j<8;j++)rev[j]=cd_base[7-j];rev[8]='\0';
+                for(j=0;j<7;j++){if(dp&(1U<<j))rdp|=(uint8_t)(1U<<(6-j));}
+                for(j=0;j<8;j++)cd_base[j]=rev[j];dp=rdp;}
+            Display_SetStr(cd_base,dp);
+        } else if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
+            uint8_t cd_mm=(uint8_t)(g_cd_remain_s/60U),cd_ss=(uint8_t)(g_cd_remain_s%60U);
+            text[0]='C';text[1]='d';
+            text[2]=(uint8_t)('0'+cd_mm/10U);text[3]=(uint8_t)('0'+cd_mm%10U);
+            text[4]=(uint8_t)('0'+cd_ss/10U);text[5]=(uint8_t)('0'+cd_ss%10U);
+            text[6]=' ';text[7]=' ';text[8]='\0';dp=0x08;
+            if(g_cd_state==CD_PAUSE&&!g_blink_on){for(i=0;i<8;i++)text[i]=' ';dp=0x00;}
+            if(g_format==FMT_RIGHT){char rev[9];uint8_t rdp=0;uint8_t j;
+                for(j=0;j<8;j++)rev[j]=text[7-j];rev[8]='\0';
+                for(j=0;j<7;j++){if(dp&(1U<<j))rdp|=(uint8_t)(1U<<(6-j));}
+                for(j=0;j<8;j++)text[j]=rev[j];dp=rdp;}
+            Display_SetStr(text,dp);
+        } else if (g_cd_state == CD_DONE) {
+            if(g_cd_scene==0){Scroll_Ensure(g_cd_active_msg,0);if(scroll_completed)Countdown_Stop();}
+            else if(g_cd_scene==1){
+                if(g_blink_on){char dpy[9]="DONE    ";Display_SetStr(dpy,0x00);}
+                else Display_SetStr("        ",0x00);
+                if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
+            else{char dpy[9]="--00--  ";Display_SetStr(dpy,0x00);
+                if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
+        } else { g_cd_state=CD_IDLE; }  // 防御: 状态值异常时回 IDLE
+        // countdown 占用了显示 跳过天气/消息/时钟
+        return;
     } else if (g_weather_until_ms > g_tick_ms) {
         // USER2 触发的天气短显 5 秒窗口
         char wt[9];
+        uint8_t wdp = 0;
         uint8_t wl;
         if (!g_weather_valid) {
             // 尚无天气数据 显示占位符
-            Display_SetStr("--C---  ", 0);
+            memcpy(wt, "--~C--- ", 9);
         } else if ((g_tick_ms - g_weather_update_ms) > WEATHER_VALID_MS && !g_blink_on) {
             // 数据过期 在闪烁的灭半周期全暗以示过期警告
-            Display_SetStr("        ", 0);
+            memcpy(wt, "        ", 9);
         } else {
             wl = (uint8_t)strlen(g_weather_text);
             for (i = 0; i < 8; i++) wt[i] = (i < wl) ? g_weather_text[i] : ' ';
             wt[8] = '\0';
-            Display_SetStr(wt, 0);
         }
+        if (g_format == FMT_RIGHT) {
+            char rev[9]; uint8_t rdp = 0; uint8_t j;
+            for (j = 0; j < 8; j++) rev[j] = wt[7 - j];
+            rev[8] = '\0';
+            for (j = 0; j < 7; j++) { if (wdp & (1U << j)) rdp |= (uint8_t)(1U << (6 - j)); }
+            for (j = 0; j < 8; j++) wt[j] = rev[j];
+            wdp = rdp;
+        }
+        Display_SetStr(wt, wdp);
         return;
     } else if (g_message_until_ms > g_tick_ms && g_message[0]) {
         // PC 下发的滚动消息 根据长度决定静态还是流水
@@ -1028,9 +1107,18 @@ static void Build_Display(void)
             // 短消息静态显示 右填空格
             char mb[9];
             uint8_t ml = (uint8_t)strlen(g_message);
+            uint8_t mdp = (uint8_t)g_message_dp;
             for (i = 0; i < 8; i++) mb[i] = (i < ml) ? g_message[i] : ' ';
             mb[8] = '\0';
-            Display_SetStr(mb, (uint8_t)g_message_dp);
+            if (g_format == FMT_RIGHT) {
+                char rev[9]; uint8_t rdp = 0; uint8_t j;
+                for (j = 0; j < 8; j++) rev[j] = mb[7 - j];
+                rev[8] = '\0';
+                for (j = 0; j < 7; j++) { if (mdp & (1U << j)) rdp |= (uint8_t)(1U << (6 - j)); }
+                for (j = 0; j < 8; j++) mb[j] = rev[j];
+                mdp = rdp;
+            }
+            Display_SetStr(mb, mdp);
         } else {
             Scroll_Ensure(g_message, g_message_dp);
             // 完整播放一遍后立即返回时钟 不会出现循环重播
@@ -1109,10 +1197,10 @@ static void Send_Display_Event(void)
 {
     char enc[9];
     uint8_t i;
-    // 构建 *EVT:DISP 报文 8 字符定长 空格填充 后跟空格和 2 位十六进制 dp bitmap
+    // 构建 *EVT:DISP 报文 8 字符定长 空位填 _ 后跟空格和 2 位十六进制 dp bitmap
     for (i = 0; i < 8; i++) {
         char c = (char)disp_buf[i];
-        enc[i] = (c == '\0') ? ' ' : c;
+        enc[i] = (c == '\0' || c == ' ') ? '_' : c;
     }
     enc[8] = '\0';
     UART_Printf("*EVT:DISP %s %02X\r\n", enc, Disp_Bitmap());
@@ -1208,7 +1296,8 @@ static void Key_Scan(void)
             g_key_fsm[b] = 2;
             Key_Push(code, KEV_LONG);
         }
-        if (code == KEY_ADD && g_edit_state != ST_IDLE) {
+        if ((code == KEY_ADD && (g_edit_state != ST_IDLE || g_cd_state == CD_EDIT)) ||
+            (code == KEY_SAVE && g_cd_state == CD_EDIT)) {
             if (Tick_TimedOut(g_key_repeat_ms[b], ADD_REPEAT_MS)) {
                 g_key_repeat_ms[b] = g_tick_ms;
                 Key_Push(code, KEV_REPEAT);
@@ -1232,6 +1321,10 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 if (g_alarm.ringing) {
                     Handle_Key(KEY_FUNC);     // 响铃中 FUNC 立即止铃
                     g_func_armed = false;
+                } else if (g_cd_state == CD_DONE) {
+                    g_func_armed = true;      // 静默 DONE 下允许长按 FUNC 退出
+                } else if (g_cd_state != CD_IDLE) {
+                    g_func_armed = false;     // 倒计时运行中 FUNC 不进时钟编辑 避免冲突
                 } else if (g_edit_state == ST_IDLE) {
                     Handle_Key(KEY_FUNC);     // 空闲态短按即进入编辑
                     g_func_armed = false;
@@ -1239,13 +1332,17 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                     g_func_armed = true;      // 编辑中暂缓 等抬起循环 / 长按保存
                 }
             } else if (ev == KEV_LONG) {
+                Send_Key_Event(KEY_FUNC);
                 if (g_func_armed) {
-                    Handle_Key(KEY_SAVE);
+                    if (g_cd_state == CD_DONE) Handle_Key(KEY_FUNC);
+                    else Handle_Key(KEY_SAVE);
                     g_func_armed = false;
                 }
             } else if (ev == KEV_UP) {
                 if (g_func_armed) {
-                    Handle_Key(KEY_FUNC);     // 短按 循环切换编辑字段或状态
+                    if (g_cd_state != CD_DONE) {
+                        Handle_Key(KEY_FUNC); // 短按 循环切换编辑字段或状态
+                    }
                     g_func_armed = false;
                 }
             }
@@ -1255,6 +1352,7 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 g_user1_armed = true;
             } else if (ev == KEV_LONG) {
                 if (g_user1_armed) {
+                    Send_Key_Event(KEY_USER1);
                     Show_Ntp_Status();        // 长按显示 NTP 同步状态
                     g_user1_armed = false;
                 }
@@ -1273,6 +1371,32 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 Handle_Key(KEY_ADD);
             }
             break;
+        case KEY_SAVE:
+            if (ev == KEV_DOWN) {
+                Send_Key_Event(KEY_SAVE);
+                Handle_Key(KEY_SAVE);
+            } else if (ev == KEV_REPEAT && g_cd_state == CD_EDIT) {
+                Handle_Key(KEY_SAVE);
+            }
+            break;
+        case KEY_EXT:
+            // 短按 启动/暂停/继续(走 Countdown_HandleKey) 长按 停止/取消倒计时
+            if (ev == KEV_DOWN) {
+                Send_Key_Event(KEY_EXT);  // 保留 §3.7 EXT 触发 *EVT:KEY EXT
+                g_ext_armed = true;
+            } else if (ev == KEV_LONG) {
+                if (g_ext_armed) {
+                    Send_Key_Event(KEY_EXT);
+                    if (g_cd_state != CD_IDLE) Countdown_Stop();
+                    g_ext_armed = false;
+                }
+            } else if (ev == KEV_UP) {
+                if (g_ext_armed) {
+                    Handle_Key(KEY_EXT);
+                    g_ext_armed = false;
+                }
+            }
+            break;
         default:
             if (ev == KEV_DOWN) {
                 Send_Key_Event(code);
@@ -1287,11 +1411,17 @@ static void Handle_Key(key_code_t key)
     // 每次按键操作刷新编辑超时计时
     g_edit_last_ms = g_tick_ms;
 
-    // 响铃中 FUNC 无条件止铃 优先级最高
+    // 响铃中 FUNC 无条件止铃 优先级最高; 若在倒计时 DONE 中也结束倒计时
     if (g_alarm.ringing && key == KEY_FUNC) {
         g_alarm.ringing = 0;
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         UART_PutString("*EVT:ALARM_OFF\r\n");
+        if (g_cd_state == CD_DONE) Countdown_Stop();
+        return;
+    }
+
+    // 情景倒计时按键 EXT/SHIFT/ADD 在非 IDLE 态优先消费 不落入时钟编辑逻辑
+    if (Countdown_HandleKey(key)) {
         return;
     }
 
@@ -1336,17 +1466,56 @@ static void Handle_Key(key_code_t key)
                     }
                 } else {
                     g_edit_date.d++;
-                    if (g_edit_date.d > Days_In_Month(g_edit_date.y, g_edit_date.m)) g_edit_date.d = 1;
+                    if (g_edit_date.d > Days_In_Month(g_edit_date.y, g_edit_date.m)) {
+                        g_edit_date.d = 1;
+                        g_edit_date.m++;
+                        if (g_edit_date.m > 12) {
+                            g_edit_date.m = 1;
+                            g_edit_date.y++;
+                        }
+                    }
                 }
             } else if (g_edit_state == ST_EDIT_TIME) {
-                // 时/分/秒各自回绕
-                if (g_edit_field == 0) g_edit_time.h = (uint8_t)((g_edit_time.h + 1U) % 24U);
-                else if (g_edit_field == 1) g_edit_time.mi = (uint8_t)((g_edit_time.mi + 1U) % 60U);
-                else g_edit_time.s = (uint8_t)((g_edit_time.s + 1U) % 60U);
+                // 时/分/秒按真实时间进位 23:59:59 -> 00:00:00
+                if (g_edit_field == 0) {
+                    g_edit_time.h = (uint8_t)((g_edit_time.h + 1U) % 24U);
+                } else if (g_edit_field == 1) {
+                    g_edit_time.mi++;
+                    if (g_edit_time.mi >= 60U) {
+                        g_edit_time.mi = 0;
+                        g_edit_time.h = (uint8_t)((g_edit_time.h + 1U) % 24U);
+                    }
+                } else {
+                    g_edit_time.s++;
+                    if (g_edit_time.s >= 60U) {
+                        g_edit_time.s = 0;
+                        g_edit_time.mi++;
+                        if (g_edit_time.mi >= 60U) {
+                            g_edit_time.mi = 0;
+                            g_edit_time.h = (uint8_t)((g_edit_time.h + 1U) % 24U);
+                        }
+                    }
+                }
             } else if (g_edit_state == ST_EDIT_ALARM) {
-                if (g_edit_field == 0) g_edit_alarm.t.h = (uint8_t)((g_edit_alarm.t.h + 1U) % 24U);
-                else if (g_edit_field == 1) g_edit_alarm.t.mi = (uint8_t)((g_edit_alarm.t.mi + 1U) % 60U);
-                else g_edit_alarm.t.s = (uint8_t)((g_edit_alarm.t.s + 1U) % 60U);
+                if (g_edit_field == 0) {
+                    g_edit_alarm.t.h = (uint8_t)((g_edit_alarm.t.h + 1U) % 24U);
+                } else if (g_edit_field == 1) {
+                    g_edit_alarm.t.mi++;
+                    if (g_edit_alarm.t.mi >= 60U) {
+                        g_edit_alarm.t.mi = 0;
+                        g_edit_alarm.t.h = (uint8_t)((g_edit_alarm.t.h + 1U) % 24U);
+                    }
+                } else {
+                    g_edit_alarm.t.s++;
+                    if (g_edit_alarm.t.s >= 60U) {
+                        g_edit_alarm.t.s = 0;
+                        g_edit_alarm.t.mi++;
+                        if (g_edit_alarm.t.mi >= 60U) {
+                            g_edit_alarm.t.mi = 0;
+                            g_edit_alarm.t.h = (uint8_t)((g_edit_alarm.t.h + 1U) % 24U);
+                        }
+                    }
+                }
                 g_edit_alarm.enabled = 1;  // 编辑闹钟后自动使能
             }
             break;
@@ -1416,6 +1585,27 @@ static void Time_Tick_1s(void)
         g_edit_state = ST_IDLE;   // 5 秒无操作自动退出编辑 不保存
     }
 
+    // 情景倒计时按秒递减/到点(内联 零栈压)
+    if (g_cd_state == CD_EDIT) {
+        if (Tick_TimedOut(g_edit_last_ms, 5000U)) { g_cd_state = CD_IDLE; Send_CD_Event(); }
+    } else if (g_cd_state == CD_RUN) {
+        if (g_cd_remain_s > 0U) g_cd_remain_s--;
+        if (g_cd_remain_s == 0U) {
+            g_cd_state = CD_DONE; g_cd_done_ms = g_tick_ms;
+            Scroll_Reset();
+            if (g_cd_scene == 0) {
+                Scroll_Ensure(g_cd_active_msg, 0);
+            }
+            if (g_cd_scene != 2) {
+                g_alarm.ringing = 1; g_alarm_ring_start_ms = g_tick_ms;
+                g_alarm_last_beep_ms = 0; g_ring_limit_ms = 10000U;
+            }
+            UART_PutString("*EVT:CD DONE\r\n");
+        } else {
+            Send_CD_Event();
+        }
+    }
+
     if (g_alarm.enabled && !g_alarm.ringing &&
         g_time.h == g_alarm.t.h && g_time.mi == g_alarm.t.mi && g_time.s == g_alarm.t.s) {
         g_alarm.ringing = 1;
@@ -1479,6 +1669,19 @@ static void Update_Status_LED(void)
         }
     }
 
+    // 情景倒计时 LED 接管(内联 零栈压): RUN/PAUSE 作进度条, DONE 全闪
+    if (g_cd_state != CD_IDLE && g_mode != MODE_NIGHT) {
+        if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
+            uint8_t lit;
+            if (g_cd_total_s == 0U) { lit = 0; }
+            else lit = (uint8_t)(((uint32_t)g_cd_remain_s * 8U + g_cd_total_s - 1U) / g_cd_total_s);
+            led = (uint8_t)(lit >= 8U ? 0xFFU : (uint8_t)((1U << lit) - 1U));
+            if (g_cd_state == CD_PAUSE && !slow) led = 0x00U;
+        } else if (g_cd_state == CD_DONE) {
+            led = fast ? 0xFFU : 0x00U;
+        }
+    }
+
     if (!g_led_override) {
         Set_LED(led);
     }
@@ -1493,12 +1696,221 @@ static void Show_Ntp_Status(void)
         if (hours > 9UL) hours = 9UL;
         snprintf(g_message, sizeof(g_message), "%luSY%s", (unsigned long)hours, code);
     } else {
-        snprintf(g_message, sizeof(g_message), " SYNO");
+        snprintf(g_message, sizeof(g_message), "_SYNO");
     }
     // 小数点位于 n 后第 0 位和 SY 后第 2 位
     g_message_dp = (uint8_t)((1U << 0) | (1U << 2));
     g_message_until_ms = g_tick_ms + 3000U;
     Scroll_Reset();
+}
+
+// ============================ §自主功能 情景倒计时 ============================
+/*
+ * 动机: 把原有单段倒计时升级为多段状态机——板上按键可独立编辑与运行, 到点按情景
+ *      (滚动文本/闪烁庆祝/静默) 收尾, 8LED 作进度条, PC 端进度环+TTS 语音联动。
+ * 设计: CD_IDLE→EDIT→RUN⇄PAUSE→DONE→IDLE。EXT 作启动/暂停/跳过键,
+ *      SHIFT/ADD 在编辑态切字段与增值。到点复用闹钟蜂鸣 + Scroll 流水。
+ * 实现: 以下 Countdown_* 函数族全部集中在本节, 对原有函数的接入仅单行守卫。
+ * 关键代码位置: Countdown_HandleKey(§L1583) / Build_Display 内联倒计时显示(§L1014) /
+ *              Update_Status_LED 内联倒计时 LED(§L1574) / Time_Tick_1s 内联递减(§L1497) /
+ *              Countdown_HandleCommand(§L1774) / Process_Command 的 strncmp 派发(§L2237)。
+ */
+
+/* Send_CD_Event: 状态切换时通过 UART 上报, PC 据此同步进度环。
+   仅发固定格式字符串避免 vsnprintf 栈分配。 */
+static void Send_CD_Event(void)
+{
+    uint8_t idx = (uint8_t)g_cd_state;
+    char buf[48];
+    uint8_t pos = 0;
+    const char *src;
+    if (idx > 4U) idx = 0U;
+    src = CD_STATE_NAMES[idx];
+    buf[pos++] = '*'; buf[pos++] = 'E'; buf[pos++] = 'V'; buf[pos++] = 'T';
+    buf[pos++] = ':'; buf[pos++] = 'C'; buf[pos++] = 'D'; buf[pos++] = ' ';
+    buf[pos++] = 'S'; buf[pos++] = 'T'; buf[pos++] = 'A'; buf[pos++] = 'T';
+    buf[pos++] = 'E'; buf[pos++] = ' ';
+    while (*src) buf[pos++] = *src++;
+    buf[pos++] = ' ';
+    /* 手工写 remain 数值 (最多4位十进制) */
+    {
+        uint16_t r = g_cd_remain_s;
+        uint8_t d[5]; int8_t di = 0;
+        if (r == 0U) d[di++] = '0';
+        else { while (r) { d[di++] = (uint8_t)('0' + (r % 10U)); r /= 10U; } }
+        while (di) buf[pos++] = d[--di];
+    }
+    buf[pos++] = ' ';
+    {
+        uint16_t t = g_cd_total_s;
+        uint8_t d[5]; int8_t di = 0;
+        if (t == 0U) d[di++] = '0';
+        else { while (t) { d[di++] = (uint8_t)('0' + (t % 10U)); t /= 10U; } }
+        while (di) buf[pos++] = d[--di];
+    }
+    buf[pos++] = ' ';
+    buf[pos++] = (uint8_t)('0' + g_cd_scene);
+    buf[pos++] = '\r'; buf[pos++] = '\n'; buf[pos] = '\0';
+    UART_PutString(buf);
+}
+
+// 启动倒计时 把编辑分秒合成总秒 钳到 1-3599 复位剩余并进入 RUN
+static void Countdown_Start(void)
+{
+    uint16_t total = (uint16_t)(g_cd_min * 60U + g_cd_sec);
+    if (total == 0U) total = 1U;
+    if (total > 3599U) total = 3599U;
+    strncpy(g_cd_active_msg, g_cd_msg, sizeof(g_cd_active_msg) - 1U);
+    g_cd_active_msg[sizeof(g_cd_active_msg) - 1U] = '\0';
+    if (g_cd_active_msg[0] == '\0' ||
+        (g_cd_active_msg[0] == 'D' && g_cd_active_msg[1] == 'O' &&
+         g_cd_active_msg[2] == 'N' && g_cd_active_msg[3] == 'E')) {
+        strcpy(g_cd_active_msg, "CONGRATULATIONS");
+    }
+    g_cd_total_s = total;
+    g_cd_remain_s = total;
+    g_cd_state = CD_RUN;
+    Scroll_Reset();
+    Send_CD_Event();
+}
+
+// 停止/取消倒计时 回到 IDLE 同时止住可能的到点响铃 LED/显示随之恢复
+static void Countdown_Stop(void)
+{
+    g_cd_state = CD_IDLE;
+    g_cd_remain_s = 0;
+    if (g_alarm.ringing) {
+        g_alarm.ringing = 0;
+        GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+    }
+    Scroll_Reset();
+    Send_CD_Event();
+}
+
+/* 倒计时按键处理 仅在非 IDLE 态消费 EXT/SHIFT/ADD 返回 true 表示已处理。
+   IDLE 态下 EXT 进入编辑 其余键放行给原有逻辑 */
+static bool Countdown_HandleKey(key_code_t key)
+{
+    if (g_cd_state == CD_IDLE) {
+        // 空闲态 EXT 进入编辑 要求不在时钟编辑中 避免两套编辑冲突
+        if (key == KEY_EXT && g_edit_state == ST_IDLE) {
+            g_cd_state = CD_EDIT;
+            g_cd_field = 0;
+            Scroll_Reset();
+            Send_CD_Event();
+            return true;
+        }
+        return false;
+    }
+
+        /* 仅消费倒计时相关键(EXT/SHIFT/ADD/SAVE)。其余键(DISP/SPEED/FORMAT 等)放行,
+       使 FORMAT 仍可在倒计时中翻转方向、SPEED 调滚动速度;
+       FUNC 已在 Dispatch_Key 中单独守卫不进时钟编辑 */
+    switch (g_cd_state) {
+        case CD_EDIT:
+            if (key == KEY_SHIFT) {
+                g_cd_field = (uint8_t)((g_cd_field + 1U) % 2U);  // 分秒二字段互相切换
+                return true;
+            }
+            if (key == KEY_ADD) {
+                if (g_cd_field == 0) g_cd_min = (uint8_t)((g_cd_min + 1U) % 60U);
+                else g_cd_sec = (uint8_t)((g_cd_sec + 1U) % 60U);
+                return true;
+            }
+            if (key == KEY_SAVE) {
+                if (g_cd_field == 0) g_cd_min = (uint8_t)((g_cd_min == 0U) ? 59U : (g_cd_min - 1U));
+                else g_cd_sec = (uint8_t)((g_cd_sec == 0U) ? 59U : (g_cd_sec - 1U));
+                return true;
+            }
+            if (key == KEY_EXT) {
+                Countdown_Start();   // 确认并启动
+                return true;
+            }
+            return false;   // 其余键放行(如 FORMAT)
+        case CD_RUN:
+            if (key == KEY_EXT) { g_cd_state = CD_PAUSE; Send_CD_Event(); return true; }
+            return false;
+        case CD_PAUSE:
+            if (key == KEY_EXT) { g_cd_state = CD_RUN; Send_CD_Event(); return true; }
+            return false;
+        case CD_DONE:
+            if (key == KEY_EXT || key == KEY_FUNC) { Countdown_Stop(); return true; }
+            return false;
+        default:
+            return false;
+    }
+}
+
+/* *SET:COUNTDOWN 子命令解析 返回 true 表示已处理(含错误应答)。
+   支持 TIME/SCENE/MSG/START/PAUSE/RESUME/STOP 及向后兼容的纯秒数形式 */
+static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
+{
+    uint16_t v16;
+    uint8_t v8;
+
+    if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
+
+    if (Token_Matches(argv[1], "TIME")) {
+        if (argc < 3 || !Parse_U16(argv[2], &v16) || v16 == 0U || v16 > 3599U) {
+            UART_PutString("ERROR RANGE\r\n"); return true;
+        }
+        g_cd_total_s = v16;
+        g_cd_min = (uint8_t)(v16 / 60U);
+        g_cd_sec = (uint8_t)(v16 % 60U);
+        UART_PutString("OK\r\n");
+        return true;
+    }
+    if (Token_Matches(argv[1], "SCENE")) {
+        if (argc < 3 || !Parse_U8(argv[2], &v8) || v8 > 2U) {
+            UART_PutString("ERROR RANGE\r\n"); return true;
+        }
+        g_cd_scene = v8;
+        UART_PutString("OK\r\n");
+        return true;
+    }
+    if (Token_Matches(argv[1], "MSG")) {
+        const char *raw = line;
+        uint8_t spaces = 0, len = 0;
+        while (*raw && spaces < 2U) {
+            if (*raw == ' ' || *raw == '\t') {
+                while (*raw == ' ' || *raw == '\t') raw++;
+                spaces++;
+            } else { raw++; }
+        }
+        if (!*raw) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
+        while (raw[len] && raw[len] != '\r' && raw[len] != '\n' && len < 32U) len++;
+        if (raw[len] && raw[len] != '\r' && raw[len] != '\n') {
+            UART_PutString("ERROR RANGE\r\n"); return true;
+        }
+        memcpy(g_cd_msg, raw, len); g_cd_msg[len] = '\0';
+        g_cd_scene = 0;
+        Scroll_Reset();
+        UART_PutString("OK\r\n");
+        return true;
+    }
+    if (Token_Matches(argv[1], "START")) {
+        Countdown_Start(); UART_PutString("OK\r\n"); return true;
+    }
+    if (Token_Matches(argv[1], "PAUSE")) {
+        if (g_cd_state == CD_RUN) { g_cd_state = CD_PAUSE; Send_CD_Event(); }
+        UART_PutString("OK\r\n"); return true;
+    }
+    if (Token_Matches(argv[1], "RESUME")) {
+        if (g_cd_state == CD_PAUSE) { g_cd_state = CD_RUN; Send_CD_Event(); }
+        UART_PutString("OK\r\n"); return true;
+    }
+    if (Token_Matches(argv[1], "STOP")) {
+        Countdown_Stop(); UART_PutString("OK\r\n"); return true;
+    }
+    // 向后兼容 *SET:COUNTDOWN <sec> 设时长并立即启动
+    if (Parse_U16(argv[1], &v16)) {
+        if (v16 == 0U || v16 > 3599U) { UART_PutString("ERROR RANGE\r\n"); return true; }
+        g_cd_min = (uint8_t)(v16 / 60U); g_cd_sec = (uint8_t)(v16 % 60U);
+        Countdown_Start(); UART_PutString("OK\r\n"); return true;
+    }
+
+    UART_PutString("ERROR PARAM\r\n");
+    return true;
 }
 
 static void Alarm_Service(void)
@@ -1626,6 +2038,13 @@ static bool Token_Matches(const char *token, const char *pattern)
     return strncmp(p, t, strlen(t)) == 0;
 }
 
+static bool Command_Matches(const char *token, const char *pattern)
+{
+    if (Token_Matches(token, pattern)) return true;
+    if (pattern[0] == '*' && Token_Matches(token, pattern + 1)) return true;
+    return false;
+}
+
 static bool Parse_U8(const char *s, uint8_t *out)
 {
     long v;
@@ -1668,6 +2087,12 @@ static void Process_Command(char *line)
     uint8_t argc = 0;
     char *tok;
     uint8_t i;
+    char *sync;
+
+    // 若 UART 边界抖动导致行首混入残留字节, 从第一个 '*' 重新同步。
+    // 若首字节 '*' 偶发丢失, 后续 Command_Matches 会接受无 '*' 命令头。
+    sync = strchr(line, '*');
+    if (sync) line = sync;
 
     // 统一转为大写后按空格/Tab 分割为 token 数组
     Upper_Copy(work, line, sizeof(work));
@@ -1679,13 +2104,13 @@ static void Process_Command(char *line)
     if (argc == 0) return;
 
     // ---- *PING 心跳应答 ----
-    if (Token_Matches(argv[0], "*PING")) {
+    if (Command_Matches(argv[0], "*PING")) {
         UART_Printf("*PONG %lu\r\n", (unsigned long)(g_tick_ms / 1000U));
         return;
     }
 
     // ---- *RST 复位 恢复出厂默认值 ----
-    if (Token_Matches(argv[0], "*RST")) {
+    if (Command_Matches(argv[0], "*RST")) {
         g_date.y = 2026; g_date.m = 6; g_date.d = 1;
         g_time.h = 0; g_time.mi = 0; g_time.s = 0;
         Calc_Wday(&g_date);
@@ -1696,13 +2121,14 @@ static void Process_Command(char *line)
         g_ntp_synced = false;
         g_message_until_ms = 0;
         g_weather_until_ms = 0;
+        g_cd_state = CD_IDLE; g_cd_remain_s = 0;   // 复位情景倒计时
         Update_Status_LED();  // 恢复后重新计算 LED 状态
         UART_PutString("OK\r\n");
         return;
     }
 
     // ---- *NTP SYNC 标记对时完成 ----
-    if (Token_Matches(argv[0], "*NTP")) {
+    if (Command_Matches(argv[0], "*NTP")) {
         if (argc < 2 || !Token_Matches(argv[1], "SYNC")) {
             UART_PutString("ERROR SYNTAX\r\n");
             return;
@@ -1715,11 +2141,16 @@ static void Process_Command(char *line)
     }
 
     // 同时支持空格形式和冒号形式的 GET 命令 "*GET DATE" 和 "*GET:DATE"
-    if (Token_Matches(argv[0], "*GET") || strncmp(argv[0], "*GET:", 5) == 0) {
+    // 逐字符比较 argv[0][0..4] 与 "*GET:" 避免 strncmp 在 ARMCC 上的内存段问题
+    if (Command_Matches(argv[0], "*GET") ||
+        (argv[0][0]=='*' && argv[0][1]=='G' && argv[0][2]=='E' && argv[0][3]=='T' && argv[0][4]==':') ||
+        (argv[0][0]=='G' && argv[0][1]=='E' && argv[0][2]=='T' && argv[0][3]==':')) {
         char value[24];
         const char *sub;
-        if (strncmp(argv[0], "*GET:", 5) == 0 && argv[0][5] != '\0') {
+        if (argv[0][0]=='*' && argv[0][1]=='G' && argv[0][2]=='E' && argv[0][3]=='T' && argv[0][4]==':' && argv[0][5] != '\0') {
             sub = argv[0] + 5;                 // 冒号形式 子命令紧跟在 *GET: 后面
+        } else if (argv[0][0]=='G' && argv[0][1]=='E' && argv[0][2]=='T' && argv[0][3]==':' && argv[0][4] != '\0') {
+            sub = argv[0] + 4;                 // 兼容首字节 '*' 丢失的 GET:xxx
         } else {
             // 空格形式 子命令为下一个 token
             if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
@@ -1735,13 +2166,35 @@ static void Process_Command(char *line)
             snprintf(value, sizeof(value), "%s", disp_on ? "ON" : "OFF");
         else if (Token_Matches(sub, "FORMAT"))
             snprintf(value, sizeof(value), "%s", g_format == FMT_LEFT ? "LEFT" : "RIGHT");
+        else if (Token_Matches(sub, "COUNTDOWN")) {
+            /* 手工构建 OK <state> <remain> <total> <scene> 字符串避免栈分配 */
+            char gbuf[48]; uint8_t p = 0; const char *src; uint16_t v; uint8_t d[5]; int8_t di;
+            gbuf[p++] = 'O'; gbuf[p++] = 'K'; gbuf[p++] = ' ';
+            src = CD_STATE_NAMES[((uint8_t)g_cd_state <= 4U) ? (uint8_t)g_cd_state : 0U];
+            while (*src) gbuf[p++] = *src++;
+            gbuf[p++] = ' ';
+            v = g_cd_remain_s; di = 0;
+            if (v == 0U) d[di++] = '0';
+            else { while (v) { d[di++] = (uint8_t)('0' + (v % 10U)); v /= 10U; } }
+            while (di) gbuf[p++] = d[--di];
+            gbuf[p++] = ' ';
+            v = g_cd_total_s; di = 0;
+            if (v == 0U) d[di++] = '0';
+            else { while (v) { d[di++] = (uint8_t)('0' + (v % 10U)); v /= 10U; } }
+            while (di) gbuf[p++] = d[--di];
+            gbuf[p++] = ' ';
+            gbuf[p++] = (uint8_t)('0' + g_cd_scene);
+            gbuf[p++] = '\r'; gbuf[p++] = '\n'; gbuf[p] = '\0';
+            UART_PutString(gbuf);
+            return;
+        }
         else { UART_PutString("ERROR PARAM\r\n"); return; }
         Send_OK_Value(value);
         return;
     }
 
     // ---- *SET:KEY 模拟物理按键 不回报 *EVT:KEY 防环回 ----
-    if (Token_Matches(argv[0], "*SET:KEY")) {
+    if (Command_Matches(argv[0], "*SET:KEY")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         for (i = 1; i <= KEY_COUNT; i++) {
             if (Token_Matches(argv[1], KEY_NAMES[i])) {
@@ -1755,7 +2208,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:DISPLAY 数码管整屏开关 ----
-    if (Token_Matches(argv[0], "*SET:DISPlay")) {
+    if (Command_Matches(argv[0], "*SET:DISPlay")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "ON")) disp_on = 1;
         else if (Token_Matches(argv[1], "OFF")) disp_on = 0;
@@ -1765,7 +2218,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:FORMAT 显示方向 LEFT/RIGHT ----
-    if (Token_Matches(argv[0], "*SET:FORMAT")) {
+    if (Command_Matches(argv[0], "*SET:FORMAT")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "LEFT")) g_format = FMT_LEFT;
         else if (Token_Matches(argv[1], "RIGHT")) g_format = FMT_RIGHT;
@@ -1775,7 +2228,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:MODE 昼夜模式切换 切换后上报 *EVT:MODE ----
-    if (Token_Matches(argv[0], "*SET:MODE")) {
+    if (Command_Matches(argv[0], "*SET:MODE")) {
         if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "DAY")) g_mode = MODE_DAY;
         else if (Token_Matches(argv[1], "NIGHT")) g_mode = MODE_NIGHT;
@@ -1785,7 +2238,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:LED 远程直控 LED 00 退出接管 非00 进入接管 ----
-    if (Token_Matches(argv[0], "*SET:LED")) {
+    if (Command_Matches(argv[0], "*SET:LED")) {
         unsigned int val;
         if (argc < 2 || sscanf(argv[1], "%x", &val) != 1 || val > 0xff) {
             UART_PutString("ERROR PARAM\r\n"); return;
@@ -1804,7 +2257,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:BEEP 远程蜂鸣 借闹钟机制实现 范围 10-5000ms ----
-    if (Token_Matches(argv[0], "*SET:BEEP")) {
+    if (Command_Matches(argv[0], "*SET:BEEP")) {
         uint16_t ms;
         if (argc < 2 || !Parse_U16(argv[1], &ms) || ms < 10 || ms > 5000) {
             UART_PutString("ERROR RANGE\r\n"); return;
@@ -1817,7 +2270,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:MSG 滚动消息 ≤32 字节 保留原大小写 ----
-    if (Token_Matches(argv[0], "*SET:MSG")) {
+    if (Command_Matches(argv[0], "*SET:MSG")) {
         // 从原始 line 中取消息文本 避免 toupper 破坏大小写
         const char *raw = strchr(line, ' ');
         uint8_t rlen = 0, len = 0;
@@ -1853,7 +2306,7 @@ static void Process_Command(char *line)
     }
 
     // ---- *SET:WEA 天气数据下发 温度 -40~+50 天气码 6 种 ----
-    if (Token_Matches(argv[0], "*SET:WEA")) {
+    if (Command_Matches(argv[0], "*SET:WEA")) {
         static const char *cond_names[] = {"SUN", "CLD", "OVC", "RAI", "SNO", "FOG"};
         char cond[8];
         long temp;
@@ -1879,27 +2332,21 @@ static void Process_Command(char *line)
         g_weather_code = code;
         g_weather_valid = true;
         g_weather_update_ms = g_tick_ms;
-        // 构建短显文本 如 "25CSUN"
-        snprintf(g_weather_text, sizeof(g_weather_text), "%ldC%s", temp, cond_names[code]);
+        // 构建短显文本 如 "25~CSUN" ~ 渲染为上方四段
+        snprintf(g_weather_text, sizeof(g_weather_text), "%ld~C%s", temp, cond_names[code]);
         UART_PutString("OK\r\n");
         return;
     }
 
-    // ---- *SET:COUNTDOWN 专注倒计时 1-3599 秒 自主增加功能 ----
-    if (Token_Matches(argv[0], "*SET:COUNTDOWN")) {
-        uint16_t sec;
-        if (argc < 2 || !Parse_U16(argv[1], &sec) || sec == 0 || sec > 3599) {
-            UART_PutString("ERROR RANGE\r\n"); return;
-        }
-        g_countdown_end_ms = g_tick_ms + ((uint32_t)sec * 1000U);
-        g_countdown_active = true;
-        UART_PutString("OK\r\n");
+    // ---- *SET:COUNTDOWN 情景倒计时 自主增加功能 子命令族 ----
+    if (Command_Matches(argv[0], "*SET:COUNTDOWN")) {
+        Countdown_HandleCommand(line, argv, argc);
         return;
     }
 
-    if (Token_Matches(argv[0], "*SET:DATE") || Token_Matches(argv[0], "*SET:TIME") || Token_Matches(argv[0], "*SET:ALARM")) {
-        bool is_date = Token_Matches(argv[0], "*SET:DATE");
-        bool is_time = Token_Matches(argv[0], "*SET:TIME");
+    if (Command_Matches(argv[0], "*SET:DATE") || Command_Matches(argv[0], "*SET:TIME") || Command_Matches(argv[0], "*SET:ALARM")) {
+        bool is_date = Command_Matches(argv[0], "*SET:DATE");
+        bool is_time = Command_Matches(argv[0], "*SET:TIME");
         // 编辑态下拒绝外部写入 防止 PC 覆盖正在编辑的值
         if (g_edit_state != ST_IDLE) { UART_PutString("ERROR BUSY\r\n"); return; }
         // *SET:ALARM OFF 关闭闹钟并停止响铃
@@ -1910,6 +2357,7 @@ static void Process_Command(char *line)
             GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
             UART_PutString("OK\r\n");
             UART_PutString("*EVT:ALARM_OFF\r\n");
+            if (g_cd_state == CD_DONE) Countdown_Stop();
             return;
         }
         {
