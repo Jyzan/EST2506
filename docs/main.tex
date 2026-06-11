@@ -1115,7 +1115,7 @@ NTP 误差 & 柱状图 & 日期 & delta（ms） & \texttt{SYNC} 事件 \\
 
 \subsection{动机}
 
-传统闹钟基于绝对时间触发(如每天 07:00:00 响铃), 适用于周期性唤醒场景。但在课堂演示、专注力训练、短时提醒等场景中, 用户更需要基于\textbf{相对时长}的倒计时功能。该功能与基础闹钟形成互补: 闹钟按绝对时间、倒计时按相对时间, 二者独立并行。在此基础上增加了\textbf{板上按键可独立编辑与运行}的能力, 以及到点后\textbf{多情景收尾}: 滚动文本、闪烁庆祝、静默。
+传统闹钟基于绝对时间触发, 适用于周期性唤醒场景。但在课堂演示、专注力训练、短时提醒等场景中, 用户更需要基于\textbf{相对时长}的倒计时功能。该功能与基础闹钟形成互补: 闹钟按绝对时间、倒计时按相对时间, 二者独立并行。在此基础上增加了\textbf{板上按键可独立编辑与运行}的能力, 以及到点后\textbf{多情景收尾}: 滚动文本、闪烁庆祝、静默。
 
 \subsection{设计}
 
@@ -1272,7 +1272,7 @@ if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
 
 \textbf{PC 端 TTS 语音 (main.py 行 61--165):}
 
-\texttt{TtsSpeaker} 类封装 \texttt{pyttsx3} / \texttt{win32com SAPI} 双通道。倒计时最后 5 秒(RUN 态 remain 1--5)时通过 \texttt{cd\_voice\_check} 复选框可选播报剩余秒数; DONE 时播报到点文本。
+\texttt{TtsSpeaker} 类封装 \texttt{pyttsx3} / \texttt{win32com SAPI} 双通道。倒计时最后 5 秒时通过 \texttt{cd\_voice\_check} 复选框可选播报剩余秒数; DONE 时播报到点文本。
 
 \textbf{PC 端 UI 控件 (main.py 行 428--483):}
 
@@ -1281,7 +1281,7 @@ if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
 \subsection{演示}
 
 \begin{enumerate}
-    \item 点击 PC 端「时长」设置为 10 秒(或直接在板上按 EXT 进入编辑, 用 ADD/SAVE 设时);
+    \item 点击 PC 端「时长」设置为 10 秒(或按 EXT 进入编辑, 用 ADD/SAVE 设时);
     \item 点击「开始」(或板上 EXT 确认), 数码管显示 \texttt{Cd0010}, 8 LED 进度条全亮;
     \item 每秒递减, LED 进度条逐位熄灭, PC 进度环同步收缩, 最后 5 秒语音倒数;
     \item 归零后:
@@ -1291,10 +1291,9 @@ if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
         \item 情景 2: 数码管静显 \texttt{--00--}, 无声无闪, 10 秒后自动退出;
     \end{itemize}
     \item PC 日志区同步出现 \texttt{*EVT:CD STATE} 1Hz 心跳和 \texttt{*EVT:CD DONE} 事件;
-    \item 倒计时期间 RUN/PAUSE 可按 EXT 暂停/继续, 长按 EXT 停止; 闹钟功能独立可用互不干扰。
+    \item 倒计时期间 RUN/PAUSE 可按 EXT 暂停/继续, 长按 EXT 停止; 闹钟功能独立可用。
 \end{enumerate}
 
-\textbf{关键代码位置}: \texttt{Countdown\_HandleKey (main.c 行 1792)} / \texttt{Build\_Display} 内联倒计时显示 (\texttt{main.c 行 1031}) / \texttt{Update\_Status\_LED} 内联倒计时 LED (\texttt{main.c 行 1652}) / \texttt{Time\_Tick\_1s} 内联递减 (\texttt{main.c 行 1587}) / \texttt{Countdown\_HandleCommand (main.c 行 1846)} / \texttt{Process\_Command} 派发 (\texttt{main.c 行 2343})。
 
 % ============================================================
 %  6. 难点解决与防崩溃机制
