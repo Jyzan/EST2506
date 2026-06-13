@@ -58,7 +58,7 @@ class SerialWorker(QThread):
             self._ser.setRTS(False)
             self.connection_changed.emit(True)
         except Exception as exc:
-            self.error.emit(f"open {self.port} failed: {exc}")
+            self.error.emit(f"无法打开串口 {self.port}: {exc}")
             self.connection_changed.emit(False)
             return
 
@@ -82,7 +82,7 @@ class SerialWorker(QThread):
                 else:
                     time.sleep(0.005)
             except Exception as exc:
-                self.error.emit(f"serial error: {exc}")
+                self.error.emit(f"串口通信异常: {exc}")
                 break
 
         try:

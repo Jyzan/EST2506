@@ -12,7 +12,9 @@ def fetch_network_time(timeout=3):
         try:
             response = ntplib.NTPClient().request(server, version=3, timeout=timeout)
             network_time = dt.datetime.fromtimestamp(response.tx_time)
-            delta_ms = int((network_time - dt.datetime.now()).total_seconds() * 1000)
+            # offset 已按 NTP 四时间戳算法扣除往返延迟 反映本地时钟相对标准时间的真实偏差
+            # 正值表示本地时钟慢 负值表示本地时钟快 不再被网络单程延迟系统性带偏
+            delta_ms = int(response.offset * 1000)
             return network_time, delta_ms, server
         except Exception as exc:
             last_error = exc

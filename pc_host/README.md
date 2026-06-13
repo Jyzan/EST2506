@@ -409,7 +409,7 @@ flowchart LR
 | **时间戳格式** | `[HH:MM:SS.fff]` — 精确到毫秒 |
 | **自动滚动** | 仅当用户停留在底部时自动跟随；向上翻阅历史时保持当前位置 |
 | **最大行数** | `setMaximumBlockCount(1000)` — 超过自动丢弃最早行 |
-| **心跳过滤** | `QCheckBox "显示心跳"` 默认关闭，过滤 `*PONG` / `*EVT:DISP` / `*EVT:LED` |
+| **心跳过滤** | `QCheckBox "显示心跳"` 默认关闭，过滤 `*PING` / `*PONG` / `*EVT:DISP` / `*EVT:LED`（收发双向） |
 | **导出** | `QFileDialog` → 保存为 UTF-8 TXT 文件 |
 | **清空** | `log.clear()` 即时清空 |
 
@@ -417,10 +417,14 @@ flowchart LR
 
 ```python
 def is_heartbeat(line: str) -> bool:
-    return line.startswith("*PONG") \
+    return line.startswith("*PING") \
+        or line.startswith("*PONG") \
         or line.startswith("*EVT:DISP") \
         or line.startswith("*EVT:LED")
 ```
+
+> `*PING`（TX 1Hz 保活）与 `*PONG`（RX 应答）成对过滤，发送侧 `send_command` 也走此判断；
+> `*EVT:CD STATE` 属倒计时业务状态，文档未列为心跳，不过滤。
 
 - [x] 协议方向、颜色、时间戳均准确无误
 - [x] 高频事件发生时日志滚动流畅不卡顿
@@ -579,8 +583,8 @@ timestamp,type,data
 
 | 图表 | 类型 | X 轴 | Y 轴 | 说明 |
 |------|:--:|------|------|------|
-| **Alarm by Hour** | 柱状图 | 小时 (0-23) | 闹钟触发次数 | 统计各时段闹钟频率 |
-| **NTP Delta (ms)** | 折线图 | 时间序列 | 对时偏差 (ms) | 反映本地时钟漂移 |
+| **Alarm by Hour** | 折线图 | 小时 (0-23) | 闹钟触发次数 | 统计各时段闹钟频率 |
+| **NTP Delta (ms)** | 柱状图 | 时间序列 | 对时偏差 (ms) | 反映本地时钟漂移 |
 | **Key Heat** | 条形图 | 按键名 | 按压次数 | 10 种按键热度统计 |
 
 **技术实现：**
@@ -663,7 +667,7 @@ def install_excepthook():
 
 ![数据可视化看板](images/数据可视化看板.jpg)
 
-**图 3：数据可视化看板** — 三张 Matplotlib 图表并列展示：Alarm by Hour（柱状图）、NTP Delta（折线图）、Key Heat（条形图）。底部有「刷新图表」和「导出 CSV」按钮。
+**图 3：数据可视化看板** — 三张 Matplotlib 图表并列展示：Alarm by Hour（折线图）、NTP Delta（柱状图）、Key Heat（条形图）。底部有「刷新图表」和「导出 CSV」按钮。
 
 ---
 

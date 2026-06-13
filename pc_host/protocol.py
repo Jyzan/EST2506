@@ -3,19 +3,28 @@ def with_crlf(line: str) -> str:
 
 
 def is_heartbeat(line: str) -> bool:
-    # *EVT:CD STATE 在运行时 1Hz 发送, 与 DISP/LED 同视为心跳避免刷屏;
-    # *EVT:CD DONE 为一次性事件, 不过滤。
-    return (line.startswith("*PONG") or line.startswith("*EVT:DISP")
-            or line.startswith("*EVT:LED") or line.startswith("*EVT:CD STATE"))
+    # 心跳仅含 C1 的 PING 与 PONG 1Hz 保活 以及 C3 的 DISP 与 LED 事件 1Hz 显示心跳
+    # 倒计时状态属业务数据 文档未列为心跳 不过滤
+    return (line.startswith("*PING") or line.startswith("*PONG")
+            or line.startswith("*EVT:DISP") or line.startswith("*EVT:LED"))
 
 
 def parse_disp_event(line: str):
     body = line[len("*EVT:DISP "):]
     if len(body) < 3:
         raise ValueError("short DISP event")
-    payload = body[:-3][:8].ljust(8).replace("_", " ")
+    enc = body[:-3][:8].ljust(8)
     dp = int(body[-2:], 16)
-    return payload, dp
+    # 协议约定 _ 为定长填空的空位占位符 解码时一律还原为空格
+    # 全工程中唯一要真实显示下划线字形的是未对时短显 _SYNO 含逆序的 ONYS_
+    # 这是固定文案 单独识别后保留其字面 _ 其余场景的 _ 全部按填充处理
+    # 字面下划线紧贴 SYNO 一侧 另一端的 _ 是填充 需去掉避免出现 _SYNO___
+    # LEFT 下划线在前导 去尾部填充 RIGHT 逆序后下划线在尾部 去前导填充
+    if "SYNO" in enc:
+        return enc.rstrip("_").ljust(8), dp
+    if "ONYS" in enc:
+        return enc.lstrip("_").rjust(8), dp
+    return enc.replace("_", " "), dp
 
 
 def parse_led_event(line: str) -> int:

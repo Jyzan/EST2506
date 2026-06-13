@@ -26,7 +26,7 @@
 #define DISP_LEN             8     // §2 数码管位数 共 8 位
 #define DISPLAY_TIMER_HZ     1000U // §2 定时器驱动数码管动态扫描 1ms 周期
 #define KEY_SCAN_TICKS       20U   // §3 每 20 次扫描中断采样一次 TCA 按键
-#define KEY_DEBOUNCE_COUNT   1U
+#define KEY_DEBOUNCE_COUNT   3U   // 需连续 3 次稳定采样才认边沿 抑制 EXT 等键抖动多触发
 #define ADD_REPEAT_MS        200U
 #define FUNC_LONG_MS         800U
 #define SERIAL_LED_MS        100U
@@ -111,13 +111,14 @@ static date_t   g_date = {2026, 6, 1, 0};
 static time_t_  g_time = {0, 0, 0};
 static date_t   g_edit_date = {2026, 6, 1, 0};
 static time_t_  g_edit_time = {0, 0, 0};
-static alarm_t  g_alarm = {{12, 0, 0}, 0, 0};
-static alarm_t  g_edit_alarm = {{12, 0, 0}, 0, 0};
+static alarm_t  g_alarm = {{0, 0, 0}, 0, 0};
+static alarm_t  g_edit_alarm = {{0, 0, 0}, 0, 0};
 // 闹钟运行时字段 响铃起始时刻 / 上次蜂鸣翻转时刻 / 当前蜂鸣电平 / 最大响铃时长
 static uint32_t g_alarm_ring_start_ms = 0;
 static uint32_t g_alarm_last_beep_ms = 0;
 static uint8_t  g_alarm_beep_on = 0;
 static uint16_t g_ring_limit_ms = 10000;
+static bool     g_beep_active = false;         // BEEP 远程蜂鸣长响标志 不走节奏翻转
 
 // ============================ 运行模式 / 杂项状态 ============================
 static format_t g_format = FMT_LEFT;
@@ -140,8 +141,8 @@ typedef enum { CD_IDLE, CD_EDIT, CD_RUN, CD_PAUSE, CD_DONE } cd_state_t;
 static cd_state_t g_cd_state = CD_IDLE;
 static uint16_t g_cd_total_s = 300;            // 设定总时长(秒) 1-3599
 static uint16_t g_cd_remain_s = 0;             // 剩余秒 支持暂停 在 Time_Tick_1s 中递减
-static uint8_t  g_cd_min = 5;                  // 编辑分(0-59)
-static uint8_t  g_cd_sec = 0;                  // 编辑秒(0-59)
+static uint8_t  g_cd_min = 0;                  // 编辑分(0-59) 默认 0
+static uint8_t  g_cd_sec = 0;                  // 编辑秒(0-59) 默认 0
 static uint8_t  g_cd_field = 0;                // 编辑字段 0=分 1=秒 2=情景
 static uint8_t  g_cd_scene = 0;                // 情景 0=滚动文本 1=闪烁庆祝 2=静默
 static char     g_cd_msg[33] = "CONGRATULATIONS";  // 到点滚动文本 默认值 由 PC UI 下发覆盖 保留大小写
@@ -199,6 +200,7 @@ static uint32_t g_key_repeat_ms[KEY_COUNT];
 static bool g_func_armed = false;           // 编辑中按下 FUNC 暂不处理 等抬起/长按再决定
 static bool g_user1_armed = false;
 static bool g_ext_armed = false;            // EXT 短按启动/暂停 长按停止 等抬起/长按再决定
+static bool g_ext_long = false;             // 本次 EXT 已触发长按 抬起时不再当短按处理
 
 #define KEY_EVQ_SIZE 16U
 static key_code_t g_evq_code[KEY_EVQ_SIZE];
@@ -509,6 +511,7 @@ int main(void)
         if (flag_1s) {
             flag_1s = 0;
             Time_Tick_1s();
+            Build_Display();  // 秒变化后刷新显示缓冲 避免心跳上报旧帧
             // 1Hz 全量心跳 即使无变化也每秒发送一次
             Send_Display_Event();
             memcpy(g_last_sent_disp, disp_buf, DISP_LEN);
@@ -1026,6 +1029,9 @@ static void Build_Display(void)
     uint8_t dp = 0;
     uint8_t i;
 
+    // 显示关闭时写入空格 确保 PC 镜像同步全暗
+    if (!disp_on) { Display_SetStr("        ", 0); return; }
+
     // 显示优先级从高到低 情景倒计时 > 天气短显 > 消息/流水 > 时钟
     // 倒计时逻辑直接内联 避免额外函数调用栈压(与旧 countdown 同模)
     if (g_cd_state != CD_IDLE) {
@@ -1120,7 +1126,9 @@ static void Build_Display(void)
             }
             Display_SetStr(mb, mdp);
         } else {
-            Scroll_Ensure(g_message, g_message_dp);
+            // RIGHT 模式滚动下一位小数点规则 需对 bitmap 左移一位补偿
+            uint32_t sd = g_format == FMT_RIGHT ? g_message_dp << 1U : g_message_dp;
+            Scroll_Ensure(g_message, sd);
             // 完整播放一遍后立即返回时钟 不会出现循环重播
             if (scroll_completed) g_message_until_ms = 0;
         }
@@ -1332,7 +1340,8 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                     g_func_armed = true;      // 编辑中暂缓 等抬起循环 / 长按保存
                 }
             } else if (ev == KEV_LONG) {
-                Send_Key_Event(KEY_FUNC);
+                // 同一次物理按压在 KEV_DOWN 已上报过一次 EVT KEY FUNC
+                // 长按不再重复上报 仅执行保存或退出动作 避免 PC LOG 多出一次 FUNC
                 if (g_func_armed) {
                     if (g_cd_state == CD_DONE) Handle_Key(KEY_FUNC);
                     else Handle_Key(KEY_SAVE);
@@ -1352,7 +1361,6 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 g_user1_armed = true;
             } else if (ev == KEV_LONG) {
                 if (g_user1_armed) {
-                    Send_Key_Event(KEY_USER1);
                     Show_Ntp_Status();        // 长按显示 NTP 同步状态
                     g_user1_armed = false;
                 }
@@ -1384,14 +1392,20 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
             if (ev == KEV_DOWN) {
                 Send_Key_Event(KEY_EXT);  // 保留 §3.7 EXT 触发 *EVT:KEY EXT
                 g_ext_armed = true;
+                g_ext_long = false;
             } else if (ev == KEV_LONG) {
+                // 同一次物理按压在 KEV_DOWN 已上报过一次 EVT KEY EXT
+                // 长按不再重复上报 仅执行停止倒计时 避免 PC LOG 多出一次 EXT
                 if (g_ext_armed) {
-                    Send_Key_Event(KEY_EXT);
                     if (g_cd_state != CD_IDLE) Countdown_Stop();
                     g_ext_armed = false;
+                    g_ext_long = true;  // 标记本次为长按 抬起时不再当短按进编辑
                 }
             } else if (ev == KEV_UP) {
-                if (g_ext_armed) {
+                // 长按已处理过就直接清标记 不再走短按 避免抬起又进入倒计时编辑
+                if (g_ext_long) {
+                    g_ext_long = false;
+                } else if (g_ext_armed) {
                     Handle_Key(KEY_EXT);
                     g_ext_armed = false;
                 }
@@ -1411,6 +1425,13 @@ static void Handle_Key(key_code_t key)
     // 每次按键操作刷新编辑超时计时
     g_edit_last_ms = g_tick_ms;
 
+    // 流水消息播放中 任意非编辑键立即中断 与物理按键一致
+    // 编辑键为 FUNC SHIFT ADD SAVE 即 key 小于 KEY_DISP 不打断
+    // 物理键已在 Dispatch_Key 按下沿打断 这里覆盖虚拟键 SET KEY 直达路径
+    if (g_message_until_ms > g_tick_ms && key >= KEY_DISP) {
+        g_message_until_ms = 0;
+    }
+
     // 响铃中 FUNC 无条件止铃 优先级最高; 若在倒计时 DONE 中也结束倒计时
     if (g_alarm.ringing && key == KEY_FUNC) {
         g_alarm.ringing = 0;
@@ -1429,16 +1450,13 @@ static void Handle_Key(key_code_t key)
         case KEY_FUNC:
             // FUNC 循环切换编辑状态 空闲→编辑日期→编辑时间→编辑闹钟→空闲
             if (g_edit_state == ST_IDLE) {
-                // 进入编辑前快照当前值 放弃时回退
+                // 进入编辑前快照日期当前值 放弃时回退
+                // 时间与闹钟不取运行值 首次为静态初值 00.00.00 之后保留上次编辑值
                 g_edit_date = g_date;
-                g_edit_time = g_time;
-                g_edit_alarm = g_alarm;
                 g_edit_state = ST_EDIT_DATE;
             } else if (g_edit_state == ST_EDIT_DATE) {
-                g_edit_time = g_time;
                 g_edit_state = ST_EDIT_TIME;
             } else if (g_edit_state == ST_EDIT_TIME) {
-                g_edit_alarm = g_alarm;
                 g_edit_state = ST_EDIT_ALARM;
             } else {
                 g_edit_state = ST_IDLE;
@@ -1758,7 +1776,7 @@ static void Send_CD_Event(void)
 static void Countdown_Start(void)
 {
     uint16_t total = (uint16_t)(g_cd_min * 60U + g_cd_sec);
-    if (total == 0U) total = 1U;
+    if (total == 0U) return;   // 00.00 不启动 必须先设非零时长
     if (total > 3599U) total = 3599U;
     strncpy(g_cd_active_msg, g_cd_msg, sizeof(g_cd_active_msg) - 1U);
     g_cd_active_msg[sizeof(g_cd_active_msg) - 1U] = '\0';
@@ -1823,6 +1841,8 @@ static bool Countdown_HandleKey(key_code_t key)
                 return true;
             }
             if (key == KEY_EXT) {
+                // 时长仍为 00.00 时不允许启动 必须先改成非零 留在编辑态等待修改
+                if (g_cd_min == 0U && g_cd_sec == 0U) return true;
                 Countdown_Start();   // 确认并启动
                 return true;
             }
@@ -1919,10 +1939,13 @@ static void Alarm_Service(void)
     // 超时自动止铃
     if (Tick_TimedOut(g_alarm_ring_start_ms, g_ring_limit_ms)) {
         g_alarm.ringing = 0;
+        g_beep_active = false;                    // 长响标志复位
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         UART_PutString("*EVT:ALARM_OFF\r\n");
         return;
     }
+    // BEEP 远程蜂鸣长响 不走节奏翻转 保持蜂鸣器持续导通
+    if (g_beep_active) return;
     // 夜间模式抑制蜂鸣器 闹钟不响
     if (g_mode == MODE_NIGHT) {
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
@@ -2114,7 +2137,7 @@ static void Process_Command(char *line)
         g_date.y = 2026; g_date.m = 6; g_date.d = 1;
         g_time.h = 0; g_time.mi = 0; g_time.s = 0;
         Calc_Wday(&g_date);
-        g_alarm.t.h = 12; g_alarm.t.mi = 0; g_alarm.t.s = 0;
+        g_alarm.t.h = 0; g_alarm.t.mi = 0; g_alarm.t.s = 0;
         g_alarm.enabled = 0; g_alarm.ringing = 0;
         disp_on = 1; g_format = FMT_LEFT; g_mode = MODE_DAY;
         g_led_override = false;
@@ -2135,6 +2158,9 @@ static void Process_Command(char *line)
         }
         g_ntp_synced = true;
         g_ntp_last_sync_ms = g_tick_ms;
+        // 对时完成后中断流水回到时钟显示 使虚拟 USR1 短按效果与物理键一致
+        // 物理 USR1 短按已在按下沿中断 此处覆盖虚拟短按经 NTP 流程的路径
+        g_message_until_ms = 0;
         Update_Status_LED();
         UART_PutString("OK\r\n");
         return;
@@ -2265,6 +2291,10 @@ static void Process_Command(char *line)
         g_alarm.ringing = 1;
         g_alarm_ring_start_ms = g_tick_ms;
         g_ring_limit_ms = ms;
+        g_beep_active = true;                     // BEEP 长响不走节奏翻转
+        g_alarm_beep_on = 1;
+        g_alarm_last_beep_ms = 0;
+        GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, GPIO_PIN_5);  // 立即打开蜂鸣器
         UART_PutString("OK\r\n");
         return;
     }

@@ -2,6 +2,7 @@ import datetime as dt
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor, QTextCharFormat, QTextCursor
@@ -176,7 +177,7 @@ class MainWindow(QMainWindow):
         self.net_worker = None
         self.last_ping_time = None
         self.last_pong_time = 0.0
-        self.store = EventStore("events.csv")
+        self.store = EventStore(str(Path(__file__).resolve().parent / "events.csv"))
         self.log_lines = 0
         self.tts = TtsSpeaker()
         self.cd_state = "IDLE"
@@ -185,6 +186,8 @@ class MainWindow(QMainWindow):
         self._cd_ring_timer = QTimer(self)
         self._cd_ring_timer.timeout.connect(self._cd_ring_tick)
         self._pending_daynight = False
+        self._last_daynight_mode = None   # 上次已下发的昼夜模式 用于仅在跨越时下发
+        self._daynight_force = False      # 手动应用按钮置位 强制下发一次
 
         self.build_ui()
         self.refresh_ports()
@@ -246,7 +249,7 @@ class MainWindow(QMainWindow):
     def build_control_panel(self):
         tabs = QTabWidget()
         tabs.addTab(self.build_control_scroll(), "控制")
-        tabs.addTab(self.build_data_tab(), "数据")
+        tabs.addTab(self.build_data_tab(), "数据看板")
         self.control_tabs = tabs
         return tabs
 
@@ -284,10 +287,13 @@ class MainWindow(QMainWindow):
         self.year_spin = self.field_spin(2000, 2099, dt.date.today().year)
         self.month_spin = self.field_spin(1, 12, dt.date.today().month)
         self.day_spin = self.field_spin(1, 31, dt.date.today().day)
-        self.hour_spin = self.field_spin(0, 23, dt.datetime.now().hour)
-        self.min_spin = self.field_spin(0, 59, dt.datetime.now().minute)
-        self.sec_spin = self.field_spin(0, 59, dt.datetime.now().second)
-        self.alarm_h_spin = self.field_spin(0, 23, 12)
+        # 年月变动时联动更新日的上限 阻止选择不存在的日期
+        self.year_spin.valueChanged.connect(self._clamp_day_range)
+        self.month_spin.valueChanged.connect(self._clamp_day_range)
+        self.hour_spin = self.field_spin(0, 23, 0)
+        self.min_spin = self.field_spin(0, 59, 0)
+        self.sec_spin = self.field_spin(0, 59, 0)
+        self.alarm_h_spin = self.field_spin(0, 23, 0)
         self.alarm_m_spin = self.field_spin(0, 59, 0)
         self.alarm_s_spin = self.field_spin(0, 59, 0)
         self.date_combo = QComboBox()
@@ -371,6 +377,7 @@ class MainWindow(QMainWindow):
 
         grid.addWidget(QLabel("消息"), 2, 0)
         self.msg_edit = QLineEdit("Hello Clock")
+        # C2 规定消息文本框上限 32 字符
         self.msg_edit.setMaxLength(32)
         grid.addWidget(self.msg_edit, 2, 1)
         grid.addWidget(self.wide_button("发送消息", self.send_msg), 2, 2)
@@ -439,7 +446,7 @@ class MainWindow(QMainWindow):
 
         dur_row = QHBoxLayout()
         dur_row.addWidget(QLabel("时长"))
-        self.cd_min_spin = self.spin(0, 59, 5)
+        self.cd_min_spin = self.spin(0, 59, 0)
         self.cd_sec_spin = self.spin(0, 59, 0)
         dur_row.addWidget(self.cd_min_spin)
         dur_row.addWidget(QLabel("分"))
@@ -674,7 +681,9 @@ class MainWindow(QMainWindow):
         if any(ord(ch) > 127 for ch in line):
             QMessageBox.warning(self, "仅限 ASCII", "协议文本必须为 ASCII 字符。")
             return
-        self.add_log("TX", f"-> {line}")
+        # 发送侧同样过滤心跳 PING 为 1Hz 保活 关闭显示心跳时与 PONG 一同隐藏
+        if self.show_heartbeat.isChecked() or not is_heartbeat(line):
+            self.add_log("TX", f"-> {line}")
         if self.worker and self.worker.isRunning():
             self.worker.write_line(line)
             self._request_state_after_set(line)
@@ -696,6 +705,10 @@ class MainWindow(QMainWindow):
             self.send_command("*GET:ALARM")
 
     def on_virtual_key(self, name: str):
+        # 虚拟按键点击也计入按键热度统计 与板上物理按键同等记录
+        # 板上物理按键经由 EVT KEY 上报后已在别处记录 二者互不重复
+        self.store.append("KEY", name)
+        self.refresh_chart()
         # 短按 USER1 = 请求 PC 对时(FAQ Q9): 由 PC 直接发起 NTP 流程,
         # 不下发 *SET:KEY USER1(那会触发板上的 NTP 状态短显, 属长按职责).
         if name == "USER1":
@@ -717,6 +730,12 @@ class MainWindow(QMainWindow):
         elif name == "USER1":
             # 长按 USER1 = 板上 NTP 状态短显(FAQ Q13), 通过 *SET:KEY USER1 触发.
             self.send_command("*SET:KEY USER1")
+        elif name == "EXT":
+            # 长按 EXT = 停止/取消倒计时(与板上长按一致), 短按 *SET:KEY EXT 只会暂停.
+            # 仅计入按键热度一次, 不走 *SET:KEY EXT 以免被板上当作短按暂停.
+            self.store.append("KEY", name)
+            self.refresh_chart()
+            self.send_command("*SET:COUNTDOWN STOP")
         else:
             self.on_virtual_key(name)
 
@@ -741,11 +760,9 @@ class MainWindow(QMainWindow):
         if line.startswith("*EVT:DISP"):
             text, dp = parse_disp_event(line)
             self.twin.update_digits(text, dp)
-            self.store.append("DISP", text.strip())
             return
         if line.startswith("*EVT:LED"):
             self.twin.update_leds(parse_led_event(line))
-            self.store.append("LED", line.split()[-1])
             return
         if line.startswith("*EVT:CD"):
             self.handle_cd_event(line)
@@ -754,6 +771,7 @@ class MainWindow(QMainWindow):
             name = line.split()[-1]
             self.twin.pulse_key(name)
             self.store.append("KEY", name)
+            self.refresh_chart()
             if name == "USER1":
                 self.ntp_sync()
             elif name in ("FORMAT", "K7"):
@@ -765,8 +783,11 @@ class MainWindow(QMainWindow):
             return
         if line.startswith("*EVT:ALARM"):
             self.state.alarm = "ON" if line.strip() == "*EVT:ALARM" else "OFF"
-            self.store.append("ALARM", line)
+            # 仅在真正响铃时记一条 ALARM 事件 data 写触发时刻 时分秒 符合 C8 规范
+            # 关闭报告不是一次触发 不写入 events.csv
             if line.strip() == "*EVT:ALARM":
+                self.store.append("ALARM", dt.datetime.now().strftime("%H.%M.%S"))
+                self.refresh_chart()
                 QMessageBox.information(self, "闹钟", "S800 闹钟正在响铃。")
             return
         if line.startswith("*EVT:MODE"):
@@ -841,7 +862,7 @@ class MainWindow(QMainWindow):
         if body == "DONE":
             self._cd_ring_timer.stop()
             self.cd_state = "DONE"
-            self.store.append("CD", "DONE")
+            # 倒计时完成不写 events.csv  C8 仅定义 ALARM SYNC EDIT KEY 四类
             self.countdown_ring.update_state("DONE", 0, self.countdown_ring.total, self.cd_scene)
             if self.cd_voice_check.isChecked():
                 if self.cd_scene == 0:
@@ -877,14 +898,15 @@ class MainWindow(QMainWindow):
             self._cd_ring_timer.stop()
 
     def add_log(self, kind: str, text: str, popup=False):
-        colors = {"TX": "#0064C8", "RX": "#009600", "EVT": "#8A2BE2", "ERR": "#C80000", "SYS": "#888888"}
+        colors = {"TX": "#0064C8", "RX": "#009600", "EVT": "#9600C8", "ERR": "#C80000", "SYS": "#888888"}
         # 仅当用户停留在底部时才自动跟随; 拖动到上方查看历史时保持当前位置.
         scrollbar = self.log.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
         prev_value = scrollbar.value()
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(colors.get(kind, "#DDDDDD")))
-        stamp = dt.datetime.now().strftime("[%H:%M:%S.%f]")[:-3] + "]"
+        # %f 为 6 位微秒 裁掉末尾 4 个字符后补回 右括号 得到 3 位毫秒 即 fff
+        stamp = dt.datetime.now().strftime("[%H:%M:%S.%f]")[:-4] + "]"
         cursor = QTextCursor(self.log.document())
         cursor.movePosition(QTextCursor.End)
         cursor.setCharFormat(fmt)
@@ -903,9 +925,19 @@ class MainWindow(QMainWindow):
         self.last_ping_time = time.time()
         self.send_command("*PING")
 
+    def _clamp_day_range(self):
+        y = self.year_spin.value()
+        m = self.month_spin.value()
+        leap = (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+        max_days = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        self.day_spin.setMaximum(max_days[m - 1] if 1 <= m <= 12 else 31)
+
     def set_date(self):
         fields = self.date_combo.currentText().split()
-        values = {"YEAR": f"{self.year_spin.value():04d}", "MONTH": f"{self.month_spin.value():02d}", "DATE": f"{self.day_spin.value():02d}"}
+        year = self.year_spin.value()
+        month = self.month_spin.value()
+        day = self.day_spin.value()
+        values = {"YEAR": f"{year:04d}", "MONTH": f"{month:02d}", "DATE": f"{day:02d}"}
         self.send_command(f"*SET:DATE {' '.join(fields)} {' '.join(values[f] for f in fields)}")
 
     def set_time(self):
@@ -952,18 +984,22 @@ class MainWindow(QMainWindow):
             self.weather_desc.setText(f"{desc} ({cond})")
             self.weather_updated.setText(f"更新时间: {dt.datetime.now():%H:%M:%S}")
             self.send_command(f"*SET:WEA {temp} {cond}")
-            self.store.append("WEATHER", f"{temp} {cond}")
+            # 天气只更新卡片与收发日志 不写 events.csv  C8 仅定义 ALARM SYNC EDIT KEY 四类
             self.add_log("SYS", f"weather {temp}C {cond}")
         self.refresh_chart()
 
     def on_network_failed(self, kind, message):
-        self.add_log("ERR", f"{kind} failed: {message}", popup=True)
+        label = "NTP 对时" if kind == "ntp" else "天气获取"
+        self.add_log("ERR", f"{label}请求失败: {message}", popup=True)
 
     def force_mode(self, mode: str):
         self.auto_mode_check.setChecked(False)
+        self._last_daynight_mode = mode   # 手动强制后记下当前模式 供后续边沿判断
         self.send_command(f"*SET:MODE {mode}")
 
     def apply_daynight(self):
+        # 手动应用按钮 无论是否变化都强制下发一次
+        self._daynight_force = True
         self._pending_daynight = True
         self.send_command("*GET:TIME")
 
@@ -971,14 +1007,23 @@ class MainWindow(QMainWindow):
         try:
             mode, sunrise, sunset = current_daynight(hour=hour, minute=minute)
             self.sun_label.setText(f"日升 / 日落: {sunrise:%H:%M} / {sunset:%H:%M}")
-            self.send_command(f"*SET:MODE {mode}")
+            # 仅在手动强制 或 跨越日出日落使模式变化时才下发 避免每分钟重发
+            # 启动首次 _last_daynight_mode 为空 模式必然变化 因此会下发一次满足验收
+            if self._daynight_force or mode != self._last_daynight_mode:
+                self._last_daynight_mode = mode
+                self.send_command(f"*SET:MODE {mode}")
         except Exception as exc:
             self.add_log("ERR", f"day/night failed: {exc}")
+        finally:
+            self._daynight_force = False
 
     def auto_daynight(self):
         if not self.auto_mode_check.isChecked():
             return
-        self.apply_daynight()
+        # 周期检查不强制 仅在模式变化时下发
+        self._daynight_force = False
+        self._pending_daynight = True
+        self.send_command("*GET:TIME")
 
     def refresh_chart(self):
         self.chart.update_from_rows(self.store.rows())
@@ -1011,10 +1056,8 @@ class MainWindow(QMainWindow):
 
     def on_serial_error(self, msg: str):
         self.add_log("ERR", msg, popup=True)
-        # 串口被占用 / 打开失败: 禁用控制面板与镜像按键, 直到重新连接成功
-        if "open" in msg.lower() or "occupied" in msg.lower() or "denied" in msg.lower():
-            self.set_controls_enabled(False)
-            self.status.showMessage(msg)
+        self.set_controls_enabled(False)
+        self.status.showMessage(msg)
 
     def set_controls_enabled(self, enabled: bool):
         if hasattr(self, "control_tabs"):

@@ -1,5 +1,3 @@
-import time
-
 from PyQt5.QtCore import Qt, QRectF, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QBrush, QPen, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel, QSizePolicy, QFrame
@@ -8,32 +6,40 @@ from protocol import display_key_name, normalize_key_name
 
 
 class HoldButton(QPushButton):
-    """Button that distinguishes short clicks from long presses via mouse events.
-    Uses elapsed time on release, avoiding QTimer unreliability while held."""
+    """区分短按与长按 按住到达阈值即触发长按 无需松手 与板子行为一致"""
     hold_triggered = pyqtSignal()
     short_clicked = pyqtSignal()
 
+    HOLD_MS = 800
+
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
-        self._press_time = 0.0
+        self._long_fired = False
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._on_hold_timeout)
 
     def _set_pulse(self, on):
         self.setProperty("pulse", on)
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def _on_hold_timeout(self):
+        # 按住满阈值立即触发长按 不等松手 短按信号在松手时被抑制
+        self._long_fired = True
+        self.hold_triggered.emit()
+
     def mousePressEvent(self, event):
-        self._press_time = time.time()
+        self._long_fired = False
         self._set_pulse(True)
+        self._hold_timer.start(self.HOLD_MS)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        elapsed = time.time() - self._press_time
+        self._hold_timer.stop()
         self._set_pulse(False)
         super().mouseReleaseEvent(event)
-        if elapsed >= 0.8:
-            self.hold_triggered.emit()
-        else:
+        if not self._long_fired:
             self.short_clicked.emit()
 
 
@@ -151,7 +157,7 @@ class TwinPanel(QWidget):
 
     LED_HINTS = ["HB", "ALM", "EDIT", "RX/TX", "SUN", "RAI/SNO", "HOT", "NTP"]
     KEY_LAYOUT = [
-        ("FUNC", "FUNC"), ("SHFT", "SHIFT"), ("ADD", "ADD"), ("SAVE", "SAVE"),
+        ("FUNC", "FUNC"), ("SHIFT", "SHIFT"), ("ADD", "ADD"), ("SAVE", "SAVE"),
         ("DISP", "DISP"), ("SPEED", "SPEED"), ("FORMAT", "FORMAT"), ("EXT", "EXT"),
     ]
     GPIO_KEYS = [("USR1", "USER1"), ("USR2", "USER2")]
