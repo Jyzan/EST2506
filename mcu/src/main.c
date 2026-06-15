@@ -1033,7 +1033,7 @@ static void Build_Display(void)
     if (!disp_on) { Display_SetStr("        ", 0); return; }
 
     // 显示优先级从高到低 情景倒计时 > 天气短显 > 消息/流水 > 时钟
-    // 倒计时逻辑直接内联 避免额外函数调用栈压(与旧 countdown 同模)
+    // 倒计时逻辑直接内联 避免额外函数调用栈压
     if (g_cd_state != CD_IDLE) {
         // ---- 情景倒计时显示 (内联) ----
         if (g_cd_state == CD_EDIT) {
@@ -1078,7 +1078,7 @@ static void Build_Display(void)
                 if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
             else{char dpy[9]="--00--  ";Display_SetStr(dpy,0x00);
                 if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
-        } else { g_cd_state=CD_IDLE; }  // 防御: 状态值异常时回 IDLE
+        } else { g_cd_state=CD_IDLE; }  // 状态值异常时回 IDLE
         // countdown 占用了显示 跳过天气/消息/时钟
         return;
     } else if (g_weather_until_ms > g_tick_ms) {
@@ -1441,7 +1441,7 @@ static void Handle_Key(key_code_t key)
         return;
     }
 
-    // 情景倒计时按键 EXT/SHIFT/ADD 在非 IDLE 态优先消费 不落入时钟编辑逻辑
+    // 情景倒计时按键 EXT/SHIFT/ADD 在非 IDLE 态优先使用 不落入时钟编辑逻辑
     if (Countdown_HandleKey(key)) {
         return;
     }
@@ -1603,7 +1603,7 @@ static void Time_Tick_1s(void)
         g_edit_state = ST_IDLE;   // 5 秒无操作自动退出编辑 不保存
     }
 
-    // 情景倒计时按秒递减/到点(内联 零栈压)
+    // 情景倒计时按秒递减/到点 内联 零栈压
     if (g_cd_state == CD_EDIT) {
         if (Tick_TimedOut(g_edit_last_ms, 5000U)) { g_cd_state = CD_IDLE; Send_CD_Event(); }
     } else if (g_cd_state == CD_RUN) {
@@ -1687,7 +1687,7 @@ static void Update_Status_LED(void)
         }
     }
 
-    // 情景倒计时 LED 接管(内联 零栈压): RUN/PAUSE 作进度条, DONE 全闪
+    // 情景倒计时 LED 接管 内联 零栈压 RUN/PAUSE 作进度条 DONE 全闪
     if (g_cd_state != CD_IDLE && g_mode != MODE_NIGHT) {
         if (g_cd_state == CD_RUN || g_cd_state == CD_PAUSE) {
             uint8_t lit;
@@ -1805,7 +1805,7 @@ static void Countdown_Stop(void)
     Send_CD_Event();
 }
 
-/* 倒计时按键处理 仅在非 IDLE 态消费 EXT/SHIFT/ADD 返回 true 表示已处理。
+/* 倒计时按键处理 仅在非 IDLE 态使用 EXT/SHIFT/ADD 返回 true 表示已处理。
    IDLE 态下 EXT 进入编辑 其余键放行给原有逻辑 */
 static bool Countdown_HandleKey(key_code_t key)
 {
@@ -1821,7 +1821,7 @@ static bool Countdown_HandleKey(key_code_t key)
         return false;
     }
 
-        /* 仅消费倒计时相关键(EXT/SHIFT/ADD/SAVE)。其余键(DISP/SPEED/FORMAT 等)放行,
+        /* 仅倒计时相关键(EXT/SHIFT/ADD/SAVE)。其余键(DISP/SPEED/FORMAT 等)放行,
        使 FORMAT 仍可在倒计时中翻转方向、SPEED 调滚动速度;
        FUNC 已在 Dispatch_Key 中单独守卫不进时钟编辑 */
     switch (g_cd_state) {
@@ -1933,6 +1933,7 @@ static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
     return true;
 }
 
+// 闹钟运行时服务 每主循环调用一次 负责超时止铃和节奏翻转
 static void Alarm_Service(void)
 {
     if (!g_alarm.ringing) return;
@@ -1994,7 +1995,8 @@ static void Normalize_Date(void)
     Calc_Wday(&g_date);
 }
 
-// 构建 8 位 LED 掩码 LED i+1 点亮当且仅当数码管第 i 位显示非空字符
+// 构建 8 位 LED 掩码 LED 第 i+1 位点亮当且仅当数码管第 i 位显示非空字符
+// 用于开机画面各阶段 使 LED 与数码管同位同步亮灭
 static uint8_t Startup_Led_Mask(const char *s)
 {
     uint8_t m = 0, i;
@@ -2044,7 +2046,7 @@ static void Upper_Copy(char *dst, const char *src, uint16_t max)
     dst[i] = '\0';
 }
 
-/* 缩写匹配 algorithm 把 token 和 pattern 都转为大写后比对。
+/* 缩写匹配 把 token 和 pattern 都转为大写后比对。
    pattern 中大写字母为必输部分 小写字母可省略。
    如 pattern = "MINute" 则 "MIN"/"MINU"/"MINUT"/"MINUTE" 均合法
    但 "MI" 不合法 因为大写 N 未输入 */
@@ -2061,6 +2063,7 @@ static bool Token_Matches(const char *token, const char *pattern)
     return strncmp(p, t, strlen(t)) == 0;
 }
 
+// 命令头匹配 与 Token_Matches 一致 同时兼容首字符 '*' 可缺省
 static bool Command_Matches(const char *token, const char *pattern)
 {
     if (Token_Matches(token, pattern)) return true;
@@ -2068,6 +2071,7 @@ static bool Command_Matches(const char *token, const char *pattern)
     return false;
 }
 
+// 无符号 8 位整数解析 失败或越界返回 false
 static bool Parse_U8(const char *s, uint8_t *out)
 {
     long v;
@@ -2078,6 +2082,7 @@ static bool Parse_U8(const char *s, uint8_t *out)
     return true;
 }
 
+// 无符号 16 位整数解析 范围 0-9999 失败或越界返回 false
 static bool Parse_U16(const char *s, uint16_t *out)
 {
     long v;
