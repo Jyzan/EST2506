@@ -125,8 +125,7 @@
 }
 
 \vfill
-
-{\large 本报告为嵌入式系统设计课程大作业提交材料}
+{\large 本简介为嵌入式系统与接口技术课程大作业提交材料}
 \par}
 
 \newpage
@@ -324,7 +323,14 @@ I2C0_WriteTwo(TCA6424_I2CADDR,
 
 五态 FSM：IDLE → EDIT → RUN ↔ PAUSE → DONE → IDLE。EXT 键短按进入编辑/启动/暂停/继续，长按停止。编辑态 SHIFT 分秒字段切换、ADD 加 1、SAVE 减 1。三种情景由 g\_cd\_scene 选择：0 滚动文本（到点流水 g\_cd\_msg）、1 闪烁庆祝（DONE 全屏快闪）、2 静默（仅显 --00--）。
 
-协议扩展 *SET:COUNTDOWN TIME/SCENE/MSG/START/PAUSE/RESUME/STOP 多子命令族，*EVT:CD STATE 1Hz 上报，*GET:COUNTDOWN 查询。PC 端 CountdownRing 圆弧进度环 + TTS 语音倒数 1-5 秒。RUN/PAUSE 态 8 LED 按剩余比例进度条，DONE 态全闪。完全复用 MCU 既有蜂鸣器、显示、LED 和串口机制，不新增依赖。
+协议扩展 *SET:COUNTDOWN TIME/SCENE/MSG/START/PAUSE/RESUME/STOP。
+
+\begin{itemize}
+  \item \texttt{*EVT:CD STATE <state> <remain> <total> <scene>} 1Hz 心跳上报，PC 据此同步进度环与状态标签。state 取值 IDLE / EDIT / RUN / PAUSE / DONE，remain 和 total 为剩余秒与总秒，scene 取值 0 滚动文本、1 闪烁庆祝、2 静默。
+  \item \texttt{*EVT:CD DONE} 归零瞬间单次上报，PC 据此触发语音播报到点文本并停定时器。
+\end{itemize}
+
+同时支持 \texttt{*GET:COUNTDOWN} 查询当前倒计时状态。PC 端 CountdownRing 圆弧进度环 + TTS 语音倒数 1-5 秒。RUN/PAUSE 态 8 LED 按剩余比例进度条，DONE 态全闪。完全复用 MCU 既有蜂鸣器、显示、LED 和串口机制，不新增依赖。
 
 \subsection{实现}
 
@@ -386,9 +392,6 @@ NTP/天气网络请求阻塞 5-10 秒，Qt 事件循环被卡住无法操作。
 
 \subsection{极端边界防崩溃}
 
-全局异常钩子（main.py: 1411）：
-配合以下八大场景覆盖：
-
 \begin{table}[H]
 \centering\caption{异常场景处理表}
 \begin{tabular}{cll}\toprule
@@ -404,7 +407,7 @@ NTP/天气网络请求阻塞 5-10 秒，Qt 事件循环被卡住无法操作。
 \end{tabular}
 \end{table}
 
-任意异常均不导致 GUI 崩溃，拔 USB、断网、发错误指令均报错而非闪退。
+任意异常均不导致 GUI 崩溃，拔 USB、断网、发错误指令均报错而非闪退（main.py: 1411）。
 
 % ============================================================
 %  7. 补充说明
@@ -413,16 +416,14 @@ NTP/天气网络请求阻塞 5-10 秒，Qt 事件循环被卡住无法操作。
 \begin{itemize}
   \item \textbf{数字孪生镜像面板按键布局}: 上方 8 个 I\textsuperscript{2}C 按键(FUNC / SHFT / ADD / SAVE / DISP / SPEED / FORMAT / EXT)以 QGridLayout 2行×4列排列; 中间以 QFrame.HLine 分割线隔开; 下方 2 个 GPIO 按键(USR1 / USR2)以蓝色调独立样式水平排列, 实现与 I\textsuperscript{2}C 8 键的视觉区分。
   \item \textbf{昼夜模式时基}: 自动昼夜的定时检查仍用 PC 本地时间; 手动「应用昼夜」按钮先向 MCU 查询当前钟表时间(*GET:TIME 返回 HH.MM.SS), 再由 current\_daynight 代入计算, 确保手动判昼夜与板上显示一致。
-  \item \textbf{容错规则验证}: 协议演示页提供缩写演示按钮(如 DISP 代替 DISPlay、MIN 代替 MINute)和大小写混合演示按钮(如 *sEt:FoRmAt rIgHt), 可在不连接 MCU 的情况下直观理解容错三件套的运作机制。测试脚本 testcmd.txt 覆盖全部边界用例, 包括大小写、多余空格、合法/非法缩写、多参数组合、FORMAT RIGHT 逆序、范围校验等。
+  \item \textbf{容错规则验证}: 协议演示页提供缩写演示按钮(如 DISP 代替 DISPlay、MIN 代替 MINute)和大小写混合演示按钮(如 *sEt:FoRmAt rIgHt), 可在不连接 MCU 的情况下直观理解容错的运作机制。
   \item \textbf{SAVE按键功能}：在自主情景倒计时扩展功能触发时，为了方便设置相对时间，引入了SAVE按键作为控制减一的编辑键，当倒计时结束之后，SAVE按键恢复成和文档要求一样的功能。
 \end{itemize}
 
-\vfill
-
 \begin{center}
-\rule{6cm}{0.5pt}\\[4pt]
+\rule{12cm}{0.5pt}
+
 {\small 智能联网时钟系统~~·~~嵌入式系统设计~~·~~大作业简介}\\[2pt]
-{\small 版本 1.0~~~~2026-06-15}
 \end{center}
 
 \end{document}

@@ -2144,6 +2144,8 @@ static void Process_Command(char *line)
         Calc_Wday(&g_date);
         g_alarm.t.h = 0; g_alarm.t.mi = 0; g_alarm.t.s = 0;
         g_alarm.enabled = 0; g_alarm.ringing = 0;
+        g_beep_active = false; g_alarm_beep_on = 0;  // 关闭蜂鸣器
+        GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         disp_on = 1; g_format = FMT_LEFT; g_mode = MODE_DAY;
         g_led_override = false;
         g_ntp_synced = false;
