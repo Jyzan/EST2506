@@ -1,3 +1,4 @@
+"""NTP 网络对时 多服务器容错 返回标准时间与本地时钟偏差"""
 import datetime as dt
 
 import ntplib
@@ -7,6 +8,7 @@ SERVERS = ("ntp.aliyun.com", "cn.ntp.org.cn", "ntp.ntsc.ac.cn")
 
 
 def fetch_network_time(timeout=3):
+    """依次尝试三个 NTP 服务器获取网络时间 全部失败则抛出异常 返回 网络时间 datetime 本地时钟偏差毫秒 服务器地址 三项"""
     last_error = None
     for server in SERVERS:
         try:

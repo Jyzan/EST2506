@@ -1,3 +1,4 @@
+"""后台串口通信线程 异步收发 逐条限速防粘包 跨线程信号通知上层"""
 import queue
 import time
 
@@ -7,14 +8,16 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 
 class SerialWorker(QThread):
+    """QThread 子类 在独立线程中完成串口打开 轮询读取和限速写入 通过四个 pyqtSignal 向主线程通知收到行 连接变化 延迟更新和错误"""
     line_received = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     latency_updated = pyqtSignal(int)
     error = pyqtSignal(str)
 
-    # 连续两条命令之间的最小发送间隔(秒)。NTP 对时等场景会一次入队
-    # DATE/TIME/NTP 多条命令, 若背靠背写出, MCU 在粘包边界易丢字节
-    # (表现为 ERROR RANGE/SYNTAX)。逐条限速发送给 MCU 留出整行处理时间。
+    # 连续两条命令之间的最小发送间隔 单位秒
+    # NTP 对时等场景会一次入队 DATE/TIME/NTP 多条命令
+    # 若背靠背写出 MCU 在粘包边界易丢字节 表现为 ERROR RANGE 或 SYNTAX
+    # 逐条限速发送给 MCU 留出整行处理时间
     TX_MIN_GAP = 0.02
 
     def __init__(self):
@@ -28,18 +31,22 @@ class SerialWorker(QThread):
 
     @staticmethod
     def list_ports():
+        """扫描系统可用串口列表 供 UI 刷新下拉框"""
         return list(serial.tools.list_ports.comports())
 
     def open(self, port: str, baud: int = 115200):
+        """记录端口号与波特率 启动后台线程执行实际打开"""
         self.port = port
         self.baud = baud
         self.start()
 
     def close(self):
+        """置运行标志为假 等待线程退出 最多等 1 点 5 秒"""
         self._running = False
         self.wait(1500)
 
     def write_line(self, line: str):
+        """将字符串压入发送队列 非阻塞 线程安全 末尾自动补 CR LF"""
         self._tx.put(line.rstrip("\r\n") + "\r\n")
 
     def run(self):
@@ -65,8 +72,8 @@ class SerialWorker(QThread):
         buf = bytearray()
         while self._running:
             try:
-                # 逐条限速发送: 每轮最多写一条, 且与上一条间隔 >= TX_MIN_GAP,
-                # 避免多条命令背靠背挤进 MCU 接收链路导致粘包丢字节。
+                # 逐条限速发送 每轮最多写一条 且与上一条间隔不小于 TX_MIN_GAP
+                # 避免多条命令背靠背挤进 MCU 接收链路导致粘包丢字节
                 if not self._tx.empty() and (time.time() - self._last_tx) >= self.TX_MIN_GAP:
                     self._ser.write(self._tx.get_nowait().encode("ascii", errors="ignore"))
                     self._last_tx = time.time()

@@ -1,3 +1,4 @@
+"""数字孪生镜像面板 七段数码管 LED 指示灯 按键组 倒计时进度环"""
 from PyQt5.QtCore import Qt, QRectF, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QBrush, QPen, QFont
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel, QSizePolicy, QFrame
@@ -44,6 +45,7 @@ class HoldButton(QPushButton):
 
 
 class SevenSegmentDigit(QWidget):
+    """单个数码管组件 用 QPainter 自绘七段笔画加小数点 支持 0-9 A-Z 及常用符号 亮色 FF3030 灭色 220000"""
     SEGMENTS = {
         "a": (0.22, 0.06, 0.56, 0.08),
         "b": (0.78, 0.13, 0.08, 0.33),
@@ -120,7 +122,7 @@ class SevenSegmentDigit(QWidget):
 
 
 class LedIndicator(QWidget):
-    """圆形渐变 LED 指示灯：圆点(QSS qradialgradient) + 下方标号与注释"""
+    """圆形渐变 LED 指示灯 上方为 QSS 渐变圆点 下方为标号与含义注释"""
 
     def __init__(self, index: int, hint: str):
         super().__init__()
@@ -152,6 +154,7 @@ class LedIndicator(QWidget):
 
 
 class TwinPanel(QWidget):
+    """数字孪生镜像面板顶层容器 组合 8 位数码管 8 位 LED 8 个 I2C 按键 加 2 个 GPIO 按键 提供统一的 update_digits update_leds pulse_key 接口"""
     key_clicked = pyqtSignal(str)
     key_long = pyqtSignal(str)
 
@@ -203,7 +206,7 @@ class TwinPanel(QWidget):
             key_grid.addWidget(btn, idx // 4, idx % 4)
         layout.addLayout(key_grid)
 
-        # GPIO USER1 USER2 with visual separation from I2C keys
+        # GPIO 按键 USER1/USER2 用分隔线与上方的 I2C 按键做视觉区分
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("QFrame { color: #374151; }")
@@ -253,10 +256,7 @@ class TwinPanel(QWidget):
 
 
 class CountdownRing(QWidget):
-    """情景倒计时进度环: 圆弧进度 + 中心剩余 MM:SS + 状态文字。
-
-    与 S800 板 *EVT:CD 状态联动, 进度按 remain/total 渲染。
-    """
+    """情景倒计时进度环 包含圆弧进度 中心剩余分秒和状态文字 与 S800 板 *EVT:CD 状态联动, 进度按 remain/total 渲染。"""
 
     STATE_TEXT = {
         "IDLE": "空闲", "EDIT": "板上编辑中", "RUN": "运行中",
@@ -292,7 +292,7 @@ class CountdownRing(QWidget):
         p.setPen(QPen(QColor("#374151"), 12, Qt.SolidLine, Qt.RoundCap))
         p.drawArc(rect, 0, 360 * 16)
 
-        # 进度弧: 剩余占比, 从 12 点钟方向顺时针递减
+        # 进度弧 按剩余占比从 12 点钟方向顺时针递减
         frac = self.remain / self.total if self.total else 0
         if self.state in ("RUN", "PAUSE", "EDIT"):
             color = "#22c55e" if self.state == "RUN" else ("#fbbf24" if self.state == "PAUSE" else "#60a5fa")
@@ -303,7 +303,7 @@ class CountdownRing(QWidget):
             p.setPen(QPen(QColor("#ef4444"), 12, Qt.SolidLine, Qt.RoundCap))
             p.drawArc(rect, 0, 360 * 16)
 
-        # 中心剩余时间 MM:SS
+        # 中心剩余时间 分秒
         mm, ss = self.remain // 60, self.remain % 60
         p.setPen(QColor("#e5e7eb"))
         big = QFont()

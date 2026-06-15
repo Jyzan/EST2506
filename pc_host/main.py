@@ -1,3 +1,4 @@
+"""S800 智能时钟 PC 上位机主程序 控制面板 数字孪生镜像 串口日志 NTP 对时 天气 昼夜 数据看板 情景倒计时"""
 import datetime as dt
 import sys
 import time
@@ -33,6 +34,7 @@ KEY_NAMES = ["FUNC", "SHIFT", "ADD", "SAVE", "DISP", "SPEED", "FORMAT", "EXT", "
 
 @dataclass
 class AppState:
+    """应用全局状态 连接 在线 格式 模式 闹钟 延迟 六项"""
     connected: bool = False
     online: bool = False
     fmt: str = "LEFT"
@@ -42,6 +44,7 @@ class AppState:
 
 
 class NetworkWorker(QThread):
+    """后台网络请求线程 支持 NTP 对时和天气获取两种任务 完成后通过 done 信号返回结果 失败通过 failed 信号通知"""
     done = pyqtSignal(str, object)
     failed = pyqtSignal(str, str)
 
@@ -60,10 +63,7 @@ class NetworkWorker(QThread):
 
 
 class TtsSpeaker:
-    """离线语音播报封装: 惰性导入 pyttsx3, 后台线程朗读不阻塞 GUI。
-
-    库缺失或初始化失败时静默降级(available=False), 调用方仅记日志不崩溃。
-    """
+    """离线语音播报封装 惰性导入 pyttsx3 后台线程朗读不阻塞 GUI 库缺失或初始化失败时静默降级 可用标记置为 False 调用方仅记日志不崩溃"""
 
     def __init__(self):
         self.available = False
@@ -74,8 +74,8 @@ class TtsSpeaker:
             import importlib.util
             import queue
             import threading
-            # 仅探测依赖是否可导入。pyttsx3 在部分 Windows SAPI 默认语音损坏时
-            # 会初始化失败，因此保留 win32com 直连 SAPI 作为备用通道。
+            # 仅探测依赖是否可导入 pyttsx3 在部分 Windows SAPI 默认语音损坏时
+            # 会初始化失败 因此保留 win32com 直连 SAPI 作为备用通道
             has_win32com = importlib.util.find_spec("win32com") is not None
             has_pyttsx3 = importlib.util.find_spec("pyttsx3") is not None
             self._lock = threading.Lock()
@@ -91,12 +91,12 @@ class TtsSpeaker:
     def _ensure_engine(self):
         if self._engine is not None:
             return self._engine
-        import pyttsx3   # 惰性导入, 缺库则抛出由 say() 捕获
+        import pyttsx3   # 惰性导入 缺库则抛出由 say 捕获
         self._engine = pyttsx3.init()
         return self._engine
 
     def say(self, text: str) -> bool:
-        """后台线程朗读 text。成功调度返回 True, 失败(库缺失等)返回 False。"""
+        """后台线程朗读 text 成功调度返回 True 失败如库缺失等返回 False"""
         if not self.available:
             return False
         if self._sapi_queue is not None:
@@ -125,7 +125,7 @@ class TtsSpeaker:
             return False
 
     def _sapi_worker(self):
-        """单独线程内初始化并复用 Windows SAPI，避免每个数字重建语音对象。"""
+        """单独线程内初始化并复用 Windows SAPI 避免每个数字重建语音对象"""
         try:
             import pythoncom
             from win32com.client import Dispatch
@@ -155,8 +155,8 @@ class TtsSpeaker:
                 while not self._sapi_queue.empty():
                     text = self._sapi_queue.get_nowait()
                 try:
-                    # Async + purge: countdown speech must track the latest second,
-                    # not wait behind older utterances.
+                    # 异步并清空队列 倒计时语音必须播报最新秒数
+                    # 不能等待旧语音播完再更新
                     speaker.Speak(str(text), 3)
                 except Exception:
                     self.available = False
@@ -167,7 +167,10 @@ class TtsSpeaker:
 
 
 class MainWindow(QMainWindow):
+    """S800 上位机主窗口 三栏布局 镜像面板 控制面板 日志 管理串口连接 心跳保活 协议解析 NTP 天气 昼夜自动切换 倒计时联动"""
+
     def __init__(self):
+        """初始化窗口 创建全局状态 定时器 事件存储 语音引擎 构建 UI 并启动自动任务"""
         super().__init__()
         self.setWindowTitle("S800 Smart Clock Host - 524442910013")
         self.resize(1380, 820)
@@ -181,7 +184,7 @@ class MainWindow(QMainWindow):
         self.log_lines = 0
         self.tts = TtsSpeaker()
         self.cd_state = "IDLE"
-        self.cd_scene = 0          # 跟踪当前情景(可能被板上 EXT 编辑改变)
+        self.cd_scene = 0          # 跟踪当前情景 可能被板上 EXT 编辑改变
         self.cd_last_spoken = -1   # 上次语音播报的剩余秒 避免重复念
         self._cd_ring_timer = QTimer(self)
         self._cd_ring_timer.timeout.connect(self._cd_ring_tick)
@@ -207,6 +210,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, self.auto_daynight)
 
     def build_ui(self):
+        """组装主窗口三栏布局 镜像面板 控制面板 日志面板 状态栏"""
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowTitle("S800 Smart Clock Host - 524442910013")
@@ -242,11 +246,13 @@ class MainWindow(QMainWindow):
         self.update_connection_led()
 
     def button(self, text, slot):
+        """快捷创建按钮 绑定点击槽 返回 QPushButton"""
         btn = QPushButton(text)
         btn.clicked.connect(slot)
         return btn
 
     def build_control_panel(self):
+        """右上标签页 控制 和 数据看板"""
         tabs = QTabWidget()
         tabs.addTab(self.build_control_scroll(), "控制")
         tabs.addTab(self.build_data_tab(), "数据看板")
@@ -254,6 +260,7 @@ class MainWindow(QMainWindow):
         return tabs
 
     def build_control_scroll(self):
+        """控制标签页内容 核心 扩展 协议 三段 外层 ScrollArea"""
         container = QWidget()
         col = QVBoxLayout(container)
         col.setContentsMargins(4, 4, 8, 4)
@@ -273,6 +280,7 @@ class MainWindow(QMainWindow):
         return scroll
 
     def section(self, title, inner):
+        """将 widget 包装为带标题的 QGroupBox"""
         box = QGroupBox(title)
         lay = QVBoxLayout(box)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -280,6 +288,7 @@ class MainWindow(QMainWindow):
         return box
 
     def build_core_tab(self):
+        """核心功能区 日期 时间 闹钟 设置按钮和 GET 查询 显示开关 格式切换 消息 蜂鸣 LED 复位"""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(10)
@@ -304,7 +313,7 @@ class MainWindow(QMainWindow):
         box_layout = QVBoxLayout(time_box)
         box_layout.setSpacing(6)
 
-        # Date: fields row, then full-width action row.
+        # 日期行 上方字段行 下方全宽操作按钮行
         date_fields = QHBoxLayout()
         date_fields.addWidget(self.row_label("日期"))
         date_fields.addWidget(self.year_spin)
@@ -382,7 +391,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.msg_edit, 2, 1)
         grid.addWidget(self.wide_button("发送消息", self.send_msg), 2, 2)
 
-        # 范围放宽到 0-9999, 以便演示越界(<10 或 >5000)时 MCU 回应 ERROR RANGE.
+        # 范围放宽到 0-9999 以便演示越界 小于10 或大于5000 时 MCU 回应 ERROR RANGE
         self.beep_spin = self.spin(0, 9999, 500)
         self.led_edit = QLineEdit("5A")
         grid.addWidget(QLabel("蜂鸣(ms)"), 3, 0)
@@ -397,6 +406,7 @@ class MainWindow(QMainWindow):
         return w
 
     def build_extension_tab(self):
+        """扩展功能区 天气卡片 NTP 对时 昼夜模式 情景倒计时"""
         w = QWidget()
         layout = QVBoxLayout(w)
         net_box = QGroupBox("网络 / 天气 / 昼夜")
@@ -406,7 +416,7 @@ class MainWindow(QMainWindow):
         self.auto_mode_check = QCheckBox("自动昼夜")
         self.auto_mode_check.setChecked(True)
 
-        # 上半区: 天气卡片(左) + 控制按钮组(右), 按钮组与卡片在竖直方向居中对齐.
+        # 上半区 天气卡片在左 控制按钮组在右 按钮组与卡片在竖直方向居中对齐
         top_row = QHBoxLayout()
         top_row.addWidget(self.build_weather_card())
         btn_box = QWidget()
@@ -421,7 +431,7 @@ class MainWindow(QMainWindow):
         top_row.addWidget(btn_box, 1, Qt.AlignVCenter)
         net_layout.addLayout(top_row)
 
-        # 下半区: 日出/日落(左) 与 当前模式(右) 处于同一水平线.
+        # 下半区 日出日落在左 当前模式在右 处于同一水平线
         info_row = QHBoxLayout()
         info_row.addWidget(self.sun_label)
         info_row.addStretch(1)
@@ -434,14 +444,15 @@ class MainWindow(QMainWindow):
         return w
 
     def build_countdown_box(self):
+        """情景倒计时区域 进度环 时长编辑 情景选择 消息文本 开始 暂停 停止 语音播报"""
         box = QGroupBox("情景倒计时")
         outer = QHBoxLayout(box)
 
-        # 左: 进度环
+        # 左 进度环
         self.countdown_ring = CountdownRing()
         outer.addWidget(self.countdown_ring, 1)
 
-        # 右: 控制
+        # 右 控制区
         ctrl = QVBoxLayout()
 
         dur_row = QHBoxLayout()
@@ -491,6 +502,7 @@ class MainWindow(QMainWindow):
         return box
 
     def cd_send_msg(self):
+        """将消息文本下发到 MCU 同时切到滚动文本情景"""
         self.cd_scene_combo.blockSignals(True)
         self.cd_scene_combo.setCurrentIndex(0)
         self.cd_scene_combo.blockSignals(False)
@@ -499,6 +511,7 @@ class MainWindow(QMainWindow):
         self.send_command(f"*SET:COUNTDOWN MSG {self.cd_msg_edit.text()}")
 
     def cd_start(self):
+        """校验时长并下发倒计时启动系列命令"""
         total = self.cd_min_spin.value() * 60 + self.cd_sec_spin.value()
         if total <= 0:
             QMessageBox.warning(self, "倒计时", "时长必须大于 0 秒。")
@@ -513,6 +526,7 @@ class MainWindow(QMainWindow):
         self.send_command("*SET:COUNTDOWN START")
 
     def cd_toggle_pause(self):
+        """运行中则暂停 暂停中则继续"""
         if self.cd_state == "RUN":
             self.send_command("*SET:COUNTDOWN PAUSE")
         elif self.cd_state == "PAUSE":
@@ -524,6 +538,7 @@ class MainWindow(QMainWindow):
     }
 
     def build_weather_card(self):
+        """天气卡片 widget 城市 图标 温度 描述 更新时间"""
         card = QGroupBox("天气卡片")
         card.setObjectName("weather_card")
         card.setMinimumWidth(190)
@@ -548,6 +563,7 @@ class MainWindow(QMainWindow):
         return card
 
     def build_protocol_tab(self):
+        """协议演示页 预设指令下拉 发送 缩写和大小写演示 原始指令输入"""
         w = QWidget()
         layout = QVBoxLayout(w)
         self.combo = QComboBox()
@@ -563,7 +579,8 @@ class MainWindow(QMainWindow):
         ])
         layout.addWidget(self.combo)
         layout.addWidget(self.button("发送选中", lambda: self.send_command(self.combo.currentText())))
-        # 缩写演示: 子命令 DISPlay→DISP, 参数 MINute→MIN / SECond→SEC 均为合法缩写
+        # 缩写演示 子命令 DISPlay 可缩写为 DISP 参数 MINute 可缩写为 MIN
+        # SECond 可缩写为 SEC 均为合法缩写
         layout.addWidget(self.button("缩写演示", lambda: self.send_command("*SET:DISP ON")))
         layout.addWidget(self.button("大小写混合演示", lambda: self.send_command("*sEt:FoRmAt rIgHt")))
         self.raw_edit = QLineEdit("*PING")
@@ -573,6 +590,7 @@ class MainWindow(QMainWindow):
         return w
 
     def build_data_tab(self):
+        """数据看板标签页 三张图表 刷新和导出 CSV"""
         w = QWidget()
         layout = QVBoxLayout(w)
         self.chart = ChartWidget()
@@ -585,6 +603,7 @@ class MainWindow(QMainWindow):
         return w
 
     def build_log_panel(self):
+        """右下日志面板 心跳过滤复选框 彩色日志区 导出和清空按钮"""
         box = QGroupBox("日志")
         box.setMinimumWidth(300)
         layout = QVBoxLayout(box)
@@ -602,6 +621,7 @@ class MainWindow(QMainWindow):
         return box
 
     def spin(self, minimum, maximum, value):
+        """快捷创建 QSpinBox 设置范围和初始值"""
         box = QSpinBox()
         box.setRange(minimum, maximum)
         box.setValue(value)
@@ -609,22 +629,26 @@ class MainWindow(QMainWindow):
         return box
 
     def row_label(self, text):
+        """创建固定宽度的行标签"""
         label = QLabel(text)
         label.setFixedWidth(48)
         return label
 
     def field_spin(self, minimum, maximum, value):
+        """创建固定宽度时间字段 spin 用于年 月 日 时 分 秒"""
         box = self.spin(minimum, maximum, value)
         box.setFixedWidth(64)
         return box
 
     def wide_button(self, text, slot):
+        """创建可扩展宽度的按钮"""
         btn = self.button(text, slot)
         btn.setMinimumWidth(64)
         btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         return btn
 
     def refresh_ports(self):
+        """重新扫描系统可用串口 更新下拉框 优先选中 USB 或 CH340 串口"""
         current = self.port_combo.currentText() or DEFAULT_PORT
         self.port_combo.clear()
         ports = SerialWorker.list_ports()
@@ -636,6 +660,7 @@ class MainWindow(QMainWindow):
         self.port_combo.setCurrentText(preferred or (current if current in devices else devices[0]))
 
     def toggle_connect(self):
+        """连接或断开串口 切换按钮文字 启动或停止心跳定时器"""
         if self.worker and self.worker.isRunning():
             self.worker.close()
             return
@@ -647,6 +672,7 @@ class MainWindow(QMainWindow):
         self.worker.open(self.port_combo.currentText(), int(self.baud_combo.currentText()))
 
     def on_serial_state(self, connected):
+        """串口连接状态变化回调 更新 UI 按钮 心跳 主动查询当前状态"""
         self.state.connected = connected
         self.state.online = connected
         self.connect_btn.setText("关闭" if connected else "打开")
@@ -666,6 +692,7 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def heartbeat_tick(self):
+        """1Hz 心跳 检测 PONG 超时 3 秒则标记离线 然后发 PING"""
         if not self.state.connected:
             return
         if self.last_pong_time and (time.time() - self.last_pong_time) > 3.0:
@@ -675,6 +702,7 @@ class MainWindow(QMainWindow):
         self.ping()
 
     def send_command(self, line: str):
+        """通过串口发送一行协议命令 非 ASCII 拒绝 离线时仅记录日志"""
         line = line.strip()
         if not line:
             return
@@ -691,9 +719,10 @@ class MainWindow(QMainWindow):
             self.add_log("ERR", "not connected", popup=False)
 
     def _request_state_after_set(self, line: str):
-        # 这些 *SET 命令 MCU 只回 OK(无数据), 故发送后补一次对应 *GET, 使单选
-        # 按钮与状态栏即时反映新状态(无论命令来自协议 Tab/原始框/单选/虚拟键).
-        # *SET:KEY FORMAT 由 on_virtual_key 单独补查询; *SET:MODE 走 *EVT:MODE.
+        """SET 命令只回 OK 不含数据 发送后自动补一次对应 GET 保持 UI 同步"""
+        # 这些 SET 命令 MCU 只回 OK 无数据 故发送后补一次对应 GET 使单选按钮
+        # 与状态栏即时反映新状态 无论命令来自协议 Tab 或原始框或单选或虚拟键
+        # SET KEY FORMAT 由 on_virtual_key 单独补查询 SET MODE 走 EVT MODE
         norm = line.upper().replace(" ", "").replace("\t", "")
         if norm.startswith("*GET"):
             return
@@ -705,22 +734,24 @@ class MainWindow(QMainWindow):
             self.send_command("*GET:ALARM")
 
     def on_virtual_key(self, name: str):
+        """镜像面板虚拟按键短按响应 计入热度统计 特殊键如 USER1 直接走 NTP 流程"""
         # 虚拟按键点击也计入按键热度统计 与板上物理按键同等记录
         # 板上物理按键经由 EVT KEY 上报后已在别处记录 二者互不重复
         self.store.append("KEY", name)
         self.refresh_chart()
-        # 短按 USER1 = 请求 PC 对时(FAQ Q9): 由 PC 直接发起 NTP 流程,
-        # 不下发 *SET:KEY USER1(那会触发板上的 NTP 状态短显, 属长按职责).
+        # 短按 USER1 即请求 PC 对时 参考 FAQ Q9 由 PC 直接发起 NTP 流程
+        # 不下发 SET KEY USER1 那会触发板上的 NTP 状态短显 属长按职责
         if name == "USER1":
             self.ntp_sync()
             return
         self.send_command(f"*SET:KEY {name}")
-        # *SET:KEY 不回 *EVT:KEY(防环回), 故 FORMAT 切换后主动查询以更新状态栏
-        # (_request_state_after_set 只认 *SET:FORMAT, 不认 *SET:KEY FORMAT).
+        # SET KEY 不回 EVT KEY 防环回 故 FORMAT 切换后主动查询以更新状态栏
+        # _request_state_after_set 只认 SET FORMAT 不认 SET KEY FORMAT
         if name == "FORMAT":
             self.send_command("*GET:FORMAT")
 
     def on_virtual_long_key(self, name: str):
+        """镜像面板虚拟按键长按响应 FUNC 长按即 SAVE ADD 长按模拟三次连击"""
         if name == "FUNC":
             self.send_command("*SET:KEY SAVE")
         elif name == "ADD":
@@ -728,11 +759,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(200, lambda: self.send_command("*SET:KEY ADD"))
             QTimer.singleShot(400, lambda: self.send_command("*SET:KEY ADD"))
         elif name == "USER1":
-            # 长按 USER1 = 板上 NTP 状态短显(FAQ Q13), 通过 *SET:KEY USER1 触发.
+            # 长按 USER1 即板上 NTP 状态短显 参考 FAQ Q13 通过 SET KEY USER1 触发
             self.send_command("*SET:KEY USER1")
         elif name == "EXT":
-            # 长按 EXT = 停止/取消倒计时(与板上长按一致), 短按 *SET:KEY EXT 只会暂停.
-            # 仅计入按键热度一次, 不走 *SET:KEY EXT 以免被板上当作短按暂停.
+            # 长按 EXT 即停止或取消倒计时 与板上长按一致 短按 SET KEY EXT 只会暂停
+            # 仅计入按键热度一次 不走 SET KEY EXT 以免被板上当作短按暂停
             self.store.append("KEY", name)
             self.refresh_chart()
             self.send_command("*SET:COUNTDOWN STOP")
@@ -740,6 +771,7 @@ class MainWindow(QMainWindow):
             self.on_virtual_key(name)
 
     def on_received(self, line: str):
+        """收到串口行 分类记录日志并送入协议解析 异常不崩溃"""
         kind = "EVT" if line.startswith("*EVT:") else ("ERR" if line.startswith("ERROR") else "RX")
         if self.show_heartbeat.isChecked() or not is_heartbeat(line):
             self.add_log(kind, f"<- {line}")
@@ -750,6 +782,7 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def handle_protocol_line(self, line: str):
+        """协议行分发 按前缀匹配 PONG EVT DISP LED CD KEY EDIT ALARM MODE ERROR OK"""
         if line.startswith("*PONG"):
             self.last_pong_time = time.time()
             self.state.online = True
@@ -784,7 +817,7 @@ class MainWindow(QMainWindow):
         if line.startswith("*EVT:ALARM"):
             self.state.alarm = "ON" if line.strip() == "*EVT:ALARM" else "OFF"
             # 仅在真正响铃时记一条 ALARM 事件 data 写触发时刻 时分秒 符合 C8 规范
-            # 关闭报告不是一次触发 不写入 events.csv
+            # 关闭报告不是一次触发事件 不写入 events csv
             if line.strip() == "*EVT:ALARM":
                 self.store.append("ALARM", dt.datetime.now().strftime("%H.%M.%S"))
                 self.refresh_chart()
@@ -804,6 +837,7 @@ class MainWindow(QMainWindow):
             self.handle_ok(line)
 
     def handle_ok(self, line: str):
+        """解析 OK 应答 按载荷内容分派到倒计时状态 FORMAT 还原 LED 更新 显示开关 闹钟状态"""
         parts = line.split(maxsplit=1)
         if len(parts) < 2:
             return
@@ -813,8 +847,8 @@ class MainWindow(QMainWindow):
         if cd_status:
             self.apply_cd_status(*cd_status)
             return
-        # FORMAT 应答: RIGHT 模式下 MCU 会把 LEFT/RIGHT 逆序成 TFEL/THGIR.
-        # 此时 PC 可能尚未同步 FORMAT(首连引导), 故两种朝向都识别.
+        # FORMAT 应答 RIGHT 模式下 MCU 会把 LEFT 或 RIGHT 逆序成 TFEL 或 THGIR
+        # 此时 PC 可能尚未同步 FORMAT 如首连引导 故两种朝向都识别
         if upper in ("LEFT", "TFEL"):
             self.state.fmt = "LEFT"
             self.fmt_left.setChecked(True)
@@ -825,10 +859,10 @@ class MainWindow(QMainWindow):
             self.fmt_right.setChecked(True)
             self.update_status()
             return
-        # 其它 *GET 应答: 文档规定 RIGHT 模式下整串逆序, 按当前已知 FORMAT 还原.
+        # 其它 GET 应答 文档规定 RIGHT 模式下整串逆序 按当前已知 FORMAT 还原
         if self.state.fmt == "RIGHT":
             payload = payload[::-1]
-        # TIME 应答 HH.MM.SS 用于昼夜判断
+        # TIME 应答如 12 30 45 用于昼夜判断
         if self._pending_daynight:
             parts_dot = payload.split(".")
             if len(parts_dot) == 3 and all(len(p) == 2 and p.isdigit() for p in parts_dot):
@@ -838,17 +872,17 @@ class MainWindow(QMainWindow):
         if len(tokens) == 1 and len(tokens[0]) == 2 and all(c in "0123456789ABCDEF" for c in tokens[0].upper()):
             self.twin.update_leds(int(tokens[0], 16))
         elif len(tokens) == 1 and tokens[0].upper() in ("ON", "OFF"):
-            # 单 token 的 ON/OFF 是 *GET:DISPLAY 应答, 更新显示单选按钮(非闹钟状态).
+            # 单 token 的 ON 或 OFF 是 GET DISPLAY 应答 更新显示单选按钮 非闹钟状态
             on = tokens[0].upper() == "ON"
             (self.disp_on if on else self.disp_off).setChecked(True)
         elif len(tokens) >= 2 and tokens[-1].upper() in ("ON", "OFF"):
-            # 仅闹钟应答形如 "HH.MM.SS ON/OFF"(>=2 token); 单 token 的 ON/OFF 属
-            # *GET:DISPLAY, 不能用来更新闹钟状态, 否则首连查询显示会误置闹钟为 ON.
+            # 仅闹钟应答形如 HH MM SS ON 或 OFF 至少有2个token 单 token 的 ON 或 OFF
+            # 属于 GET DISPLAY 应答 不能用来更新闹钟状态 否则首连查询显示会误置闹钟为 ON
             self.state.alarm = tokens[-1].upper()
             self.update_status()
 
     def _cd_ring_tick(self):
-        """兜底递减: MCU 的 1Hz STATE 丢失时才临时推进一次。"""
+        """兜底递减 MCU 的 1Hz STATE 丢失时才临时推进一次"""
         remain = max(0, self.countdown_ring.remain - 1)
         self.countdown_ring.update_state("RUN", remain, self.countdown_ring.total, self.cd_scene)
         # 本地语音倒数
@@ -858,11 +892,12 @@ class MainWindow(QMainWindow):
                 self.tts.say(str(remain))
 
     def handle_cd_event(self, line: str):
+        """处理 EVT CD 事件 DONE 时停定时器并语音播报 其他状态推送进度环"""
         body = line[len("*EVT:CD"):].strip()
         if body == "DONE":
             self._cd_ring_timer.stop()
             self.cd_state = "DONE"
-            # 倒计时完成不写 events.csv  C8 仅定义 ALARM SYNC EDIT KEY 四类
+            # 倒计时完成不写 events csv 文档 C8 仅定义 ALARM SYNC EDIT KEY 四类
             self.countdown_ring.update_state("DONE", 0, self.countdown_ring.total, self.cd_scene)
             if self.cd_voice_check.isChecked():
                 if self.cd_scene == 0:
@@ -877,6 +912,7 @@ class MainWindow(QMainWindow):
         self.apply_cd_status(*parsed)
 
     def apply_cd_status(self, state: str, remain: int, total: int, scene: int):
+        """将 MCU 上报的倒计时状态同步到进度环和暂停按钮 RUN 态启动兜底定时器"""
         self.cd_state = state
         self.cd_scene = scene
         if scene != self.cd_scene_combo.currentIndex():
@@ -885,7 +921,7 @@ class MainWindow(QMainWindow):
             self.cd_scene_combo.blockSignals(False)
         self.countdown_ring.update_state(state, remain, total, scene)
         self.cd_pause_btn.setText("继续" if state == "PAUSE" else "暂停")
-        # RUN 态以 MCU 每秒 STATE 为主; 本地定时器只作 1.2s 无事件兜底。
+        # RUN 态以 MCU 每秒 STATE 为主 本地定时器只作 1 点 2 秒无事件兜底
         if state == "RUN":
             if 1 <= remain <= 5 and remain != self.cd_last_spoken:
                 self.cd_last_spoken = remain
@@ -898,8 +934,9 @@ class MainWindow(QMainWindow):
             self._cd_ring_timer.stop()
 
     def add_log(self, kind: str, text: str, popup=False):
+        """向日志区追加一条带时间戳和颜色编码的记录 自动跟随底部 错误可弹窗"""
         colors = {"TX": "#0064C8", "RX": "#009600", "EVT": "#9600C8", "ERR": "#C80000", "SYS": "#888888"}
-        # 仅当用户停留在底部时才自动跟随; 拖动到上方查看历史时保持当前位置.
+        # 仅当用户停留在底部时才自动跟随 拖动到上方查看历史时保持当前位置
         scrollbar = self.log.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
         prev_value = scrollbar.value()
@@ -920,12 +957,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", text)
 
     def ping(self):
+        """发送 PING 命令记录发送时刻用于延迟计算"""
         if not (self.worker and self.worker.isRunning()):
             return
         self.last_ping_time = time.time()
         self.send_command("*PING")
 
     def _clamp_day_range(self):
+        """根据年月联动更新日字段上限 处理闰年和非闰年二月"""
         y = self.year_spin.value()
         m = self.month_spin.value()
         leap = (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
@@ -933,6 +972,7 @@ class MainWindow(QMainWindow):
         self.day_spin.setMaximum(max_days[m - 1] if 1 <= m <= 12 else 31)
 
     def set_date(self):
+        """按日期组合下拉框所选字段组装 SET DATE 命令并发送"""
         fields = self.date_combo.currentText().split()
         year = self.year_spin.value()
         month = self.month_spin.value()
@@ -941,19 +981,24 @@ class MainWindow(QMainWindow):
         self.send_command(f"*SET:DATE {' '.join(fields)} {' '.join(values[f] for f in fields)}")
 
     def set_time(self):
+        """组装 SET TIME 命令 包含时分秒三字段"""
         self.send_command(f"*SET:TIME HOUR MIN SEC {self.hour_spin.value():02d} {self.min_spin.value():02d} {self.sec_spin.value():02d}")
 
     def set_alarm(self):
+        """组装 SET ALARM 命令 包含时分秒三字段"""
         self.send_command(f"*SET:ALARM HOUR MIN SEC {self.alarm_h_spin.value():02d} {self.alarm_m_spin.value():02d} {self.alarm_s_spin.value():02d}")
 
     def send_msg(self):
+        """发送滚动消息 文本取自消息输入框"""
         self.send_command(f"*SET:MSG {self.msg_edit.text()}")
 
     def reset_mcu(self):
+        """弹确认框后发送 RST 复位 MCU"""
         if QMessageBox.question(self, "复位", "复位 MCU 的时钟/日期/闹钟状态？") == QMessageBox.Yes:
             self.send_command("*RST")
 
     def ntp_sync(self):
+        """启动后台 NTP 对时线程 防止重复启动"""
         if self.net_worker and self.net_worker.isRunning():
             return
         self.net_worker = NetworkWorker("ntp")
@@ -962,6 +1007,7 @@ class MainWindow(QMainWindow):
         self.net_worker.start()
 
     def fetch_weather(self):
+        """启动后台天气获取线程 防止重复启动"""
         if self.net_worker and self.net_worker.isRunning():
             return
         self.net_worker = NetworkWorker("weather")
@@ -970,6 +1016,7 @@ class MainWindow(QMainWindow):
         self.net_worker.start()
 
     def on_network_done(self, kind, data):
+        """网络请求完成回调 NTP 则下发时间并写 SYNC 事件 天气则更新卡片并下发 MCU"""
         if kind == "ntp":
             now, delta_ms, server = data
             self.send_command(f"*SET:DATE YEAR MONTH DATE {now.year:04d} {now.month:02d} {now.day:02d}")
@@ -984,26 +1031,30 @@ class MainWindow(QMainWindow):
             self.weather_desc.setText(f"{desc} ({cond})")
             self.weather_updated.setText(f"更新时间: {dt.datetime.now():%H:%M:%S}")
             self.send_command(f"*SET:WEA {temp} {cond}")
-            # 天气只更新卡片与收发日志 不写 events.csv  C8 仅定义 ALARM SYNC EDIT KEY 四类
+            # 天气只更新卡片与收发日志 不写 events csv 文档 C8 仅定义 ALARM SYNC EDIT KEY 四类
             self.add_log("SYS", f"weather {temp}C {cond}")
         self.refresh_chart()
 
     def on_network_failed(self, kind, message):
+        """网络请求失败处理 日志记录并弹窗"""
         label = "NTP 对时" if kind == "ntp" else "天气获取"
         self.add_log("ERR", f"{label}请求失败: {message}", popup=True)
 
     def force_mode(self, mode: str):
+        """手动强制切换昼夜模式 关闭自动昼夜复选框"""
         self.auto_mode_check.setChecked(False)
         self._last_daynight_mode = mode   # 手动强制后记下当前模式 供后续边沿判断
         self.send_command(f"*SET:MODE {mode}")
 
     def apply_daynight(self):
+        """手动应用昼夜按钮 先获取当前时间再根据日出日落判断下发"""
         # 手动应用按钮 无论是否变化都强制下发一次
         self._daynight_force = True
         self._pending_daynight = True
         self.send_command("*GET:TIME")
 
     def _do_apply_daynight(self, hour: int, minute: int):
+        """根据当前时分计算昼夜模式 仅在模式变化或手动强制时下发 SET MODE"""
         try:
             mode, sunrise, sunset = current_daynight(hour=hour, minute=minute)
             self.sun_label.setText(f"日升 / 日落: {sunrise:%H:%M} / {sunset:%H:%M}")
@@ -1018,6 +1069,7 @@ class MainWindow(QMainWindow):
             self._daynight_force = False
 
     def auto_daynight(self):
+        """每分钟自动检查昼夜 仅在复选框选中时生效 周期不强制下发"""
         if not self.auto_mode_check.isChecked():
             return
         # 周期检查不强制 仅在模式变化时下发
@@ -1026,9 +1078,11 @@ class MainWindow(QMainWindow):
         self.send_command("*GET:TIME")
 
     def refresh_chart(self):
+        """从事件存储读取全量数据刷新数据看板图表"""
         self.chart.update_from_rows(self.store.rows())
 
     def export_csv(self):
+        """弹出保存对话框 将事件数据导出为 CSV 文件"""
         path, _ = QFileDialog.getSaveFileName(self, "导出 CSV", "events.csv", "CSV (*.csv)")
         if not path:
             return
@@ -1039,32 +1093,38 @@ class MainWindow(QMainWindow):
                 file.write(f"{row.get('timestamp','')},{row.get('type','')},{row.get('data','')}\n")
 
     def export_log(self):
+        """弹出保存对话框 将日志区域原始文本导出为 txt 文件"""
         path, _ = QFileDialog.getSaveFileName(self, "导出日志", "s800_log.txt", "Text (*.txt)")
         if path:
             with open(path, "w", encoding="utf-8") as file:
                 file.write(self.log.toPlainText())
 
     def update_connection_led(self):
+        """更新连接指示灯 QSS 样式 在线绿色 离线灰色"""
         self.conn_led.setObjectName("conn_on" if self.state.connected and self.state.online else "conn_off")
         self.conn_led.style().unpolish(self.conn_led)
         self.conn_led.style().polish(self.conn_led)
 
     def update_latency(self, ms: int):
+        """更新延迟显示和状态栏"""
         self.state.latency_ms = ms
         self.latency_label.setText(f"延迟: {ms} ms")
         self.update_status()
 
     def on_serial_error(self, msg: str):
+        """串口异常回调 记录错误日志并弹窗 禁用控件"""
         self.add_log("ERR", msg, popup=True)
         self.set_controls_enabled(False)
         self.status.showMessage(msg)
 
     def set_controls_enabled(self, enabled: bool):
+        """启用或禁用控制面板和孪生镜像 用于离线时防止误操作"""
         if hasattr(self, "control_tabs"):
             self.control_tabs.setEnabled(enabled)
         self.twin.setEnabled(enabled)
 
     def update_status(self):
+        """刷新状态栏 显示连接 在线 格式 模式 闹钟 延迟"""
         self.mode_label.setText(f"当前模式: {self.state.mode}")
         self.status.showMessage(
             f"{'已连接' if self.state.connected else '未连接'} | "
@@ -1074,6 +1134,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event):
+        """窗口关闭时安全关闭串口线程"""
         if self.worker and self.worker.isRunning():
             self.worker.close()
         event.accept()

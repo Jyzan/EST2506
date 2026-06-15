@@ -1,4 +1,7 @@
+"""S800 串口协议解析工具 处理 EVT DISP LED CD KEY 等事件报文与心跳过滤"""
+
 def with_crlf(line: str) -> str:
+    """确保字符串以 CR LF 结尾 用于串口发送"""
     return line.rstrip("\r\n") + "\r\n"
 
 
@@ -10,6 +13,7 @@ def is_heartbeat(line: str) -> bool:
 
 
 def parse_disp_event(line: str):
+    """解析 EVT DISP 报文 从 8 字符定长文本和 2 位十六进制 dp 中 提取显示内容和每一位的小数点状态 返回 8 字符显示文本 dp 位图整数值 两项"""
     body = line[len("*EVT:DISP "):]
     if len(body) < 3:
         raise ValueError("short DISP event")
@@ -28,23 +32,21 @@ def parse_disp_event(line: str):
 
 
 def parse_led_event(line: str) -> int:
+    """解析 EVT LED 报文 返回 LED 字节的整数值 每 bit 对应一位 LED"""
     return int(line.split()[-1], 16)
 
 
 def parse_cd_event(line: str):
-    """解析 *EVT:CD STATE <state> <remain> <total> <scene>。
-
-    返回 (state, remain, total, scene) 或 None(格式不符)。
-    """
+    """解析 EVT CD STATE 报文 格式为 STATE 后跟四个字段 返回 state remain total scene 四项 格式不符则返回 None"""
     tokens = line.split()
-    # tokens = ["*EVT:CD", "STATE", state, remain, total, scene]
+    # tokens 示例 EVT CD STATE 后跟 state remain total scene 四个字段
     if len(tokens) < 6 or tokens[1] != "STATE":
         return None
     return parse_cd_status_tokens(tokens[2:])
 
 
 def parse_cd_status_payload(payload: str):
-    """解析 *GET:COUNTDOWN 的 OK 载荷: <state> <remain> <total> <scene>。"""
+    """解析 GET COUNTDOWN 的 OK 载荷 格式同 STATE 的四个字段"""
     return parse_cd_status_tokens(payload.split())
 
 
@@ -66,11 +68,13 @@ def parse_cd_status_tokens(tokens):
 
 
 def normalize_key_name(name: str) -> str:
+    """将按键别名统一为正式名称 如 K7 转为 FORMAT USR1 转为 USER1"""
     name = name.upper()
     aliases = {"SHFT": "SHIFT", "USR1": "USER1", "USR2": "USER2", "K7": "FORMAT", "K8": "EXT"}
     return aliases.get(name, name)
 
 
 def display_key_name(name: str) -> str:
+    """将正式按键名转为显示缩写 如 FORMAT 转为 K7 USER1 转为 USR1"""
     aliases = {"SHIFT": "SHFT", "USER1": "USR1", "USER2": "USR2", "FORMAT": "K7", "EXT": "K8"}
     return aliases.get(name.upper(), name.upper())

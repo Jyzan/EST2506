@@ -2145,6 +2145,8 @@ static void Process_Command(char *line)
         g_message_until_ms = 0;
         g_weather_until_ms = 0;
         g_cd_state = CD_IDLE; g_cd_remain_s = 0;   // 复位情景倒计时
+        g_edit_state = ST_IDLE; g_edit_field = 0; g_edit_last_ms = 0;  // 复位编辑状态 防止 BUSY
+        g_line_too_long = false; g_rx_asm_len = 0;   // 清除串口行组装残留
         Update_Status_LED();  // 恢复后重新计算 LED 状态
         UART_PutString("OK\r\n");
         return;

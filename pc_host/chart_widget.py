@@ -1,3 +1,4 @@
+"""数据可视化看板 三张子图 闹钟分布 NTP 偏差 按键热度"""
 from collections import Counter, defaultdict
 
 import matplotlib
@@ -9,6 +10,7 @@ matplotlib.rcParams["font.family"] = "Times New Roman"
 
 
 class ChartWidget(QWidget):
+    """三图看板组件 从事件列表提取数据并绘制 子图一 闹钟触发时间按日期分布折线 子图二 NTP 对时偏差柱状图 子图三 按键热度横向柱状图"""
     def __init__(self):
         super().__init__()
         self.canvas = None
@@ -35,6 +37,7 @@ class ChartWidget(QWidget):
         old.deleteLater()
 
     def update_from_rows(self, rows):
+        """从事件行列表重建全部图表 无数据时显示空白占位"""
         self._replace_canvas()
         ax1 = self.figure.add_subplot(311)
         ax2 = self.figure.add_subplot(312)

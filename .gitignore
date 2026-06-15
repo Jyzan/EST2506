@@ -5,6 +5,7 @@ __pycache__/
 pc_host/.venv/
 pc_host/events.csv
 .venv/
+testcmdV2.1/
 
 # ── Keil uVision ──
 mcu/.vscode/
@@ -14,3 +15,10 @@ mcu/RTE/
 *.uvguix.*
 *.scvd
 *.jlink
+
+# —— Other Settings ——
+.claude
+.vscode 
+.codex
+*.md
+*.pdf
