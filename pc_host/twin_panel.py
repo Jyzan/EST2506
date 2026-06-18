@@ -170,6 +170,7 @@ class TwinPanel(QWidget):
         self.digits = []
         self.leds = []
         self.buttons = {}
+        self._state_keys = set()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -242,12 +243,28 @@ class TwinPanel(QWidget):
     def pulse_key(self, name: str):
         key = normalize_key_name(name)
         btn = self.buttons.get(key)
-        if not btn:
+        if not btn or key in self._state_keys:
             return
         btn.setProperty("pulse", True)
         btn.style().unpolish(btn)
         btn.style().polish(btn)
         QTimer.singleShot(200, lambda b=btn: self._clear_pulse(b))
+
+    def set_key_pressed(self, name: str, pressed: bool):
+        key = normalize_key_name(name)
+        btn = self.buttons.get(key)
+        if not btn:
+            return
+        self._state_keys.add(key)
+        btn.setProperty("pulse", bool(pressed))
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+    def clear_key_states(self):
+        for key in tuple(self._state_keys):
+            btn = self.buttons.get(key)
+            if btn:
+                self._clear_pulse(btn)
 
     def _clear_pulse(self, btn):
         btn.setProperty("pulse", False)

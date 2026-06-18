@@ -77,17 +77,22 @@ class SerialWorker(QThread):
                 if not self._tx.empty() and (time.time() - self._last_tx) >= self.TX_MIN_GAP:
                     self._ser.write(self._tx.get_nowait().encode("ascii", errors="ignore"))
                     self._last_tx = time.time()
-                chunk = self._ser.read(128)
-                if chunk:
-                    buf.extend(chunk)
-                    while b"\n" in buf:
-                        line, _, rest = buf.partition(b"\n")
-                        buf = bytearray(rest)
-                        text = line.decode("ascii", errors="replace").strip()
-                        if text:
-                            self.line_received.emit(text)
+                # 用 in_waiting 先检查是否有数据 有才读 避免 read() 阻塞整条线程
+                # timeout=0.1 在空闲时会让 PING→PONG 延迟固定 ≥100ms
+                # in_waiting 为 0 时短暂休眠让出 CPU 保证 TX 路径不被阻塞
+                waiting = self._ser.in_waiting
+                if waiting > 0:
+                    chunk = self._ser.read(min(waiting, 128))
+                    if chunk:
+                        buf.extend(chunk)
+                        while b"\n" in buf:
+                            line, _, rest = buf.partition(b"\n")
+                            buf = bytearray(rest)
+                            text = line.decode("ascii", errors="replace").strip()
+                            if text:
+                                self.line_received.emit(text)
                 else:
-                    time.sleep(0.005)
+                    time.sleep(0.001)
             except Exception as exc:
                 self.error.emit(f"串口通信异常: {exc}")
                 break

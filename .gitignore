@@ -22,3 +22,5 @@ mcu/RTE/
 .codex
 *.md
 *.pdf
+*.mp4
+*pdf*text*.txt

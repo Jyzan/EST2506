@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
         self._pending_daynight = False
         self._last_daynight_mode = None   # 上次已下发的昼夜模式 用于仅在跨越时下发
         self._daynight_force = False      # 手动应用按钮置位 强制下发一次
+        self._auto_reconnect_pending = False
 
         self.build_ui()
         self.refresh_ports()
@@ -207,7 +208,6 @@ class MainWindow(QMainWindow):
         self.daynight_timer.start(60 * 1000)
 
         QTimer.singleShot(1000, self.fetch_weather)
-        QTimer.singleShot(1500, self.auto_daynight)
 
     def build_ui(self):
         """组装主窗口三栏布局 镜像面板 控制面板 日志面板 状态栏"""
@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.wide_button("获取格式", lambda: self.send_command("*GET:FORMAT")), 1, 2)
 
         grid.addWidget(QLabel("消息"), 2, 0)
-        self.msg_edit = QLineEdit("Hello Clock")
+        self.msg_edit = QLineEdit("Hello")
         # C2 规定消息文本框上限 32 字符
         self.msg_edit.setMaxLength(32)
         grid.addWidget(self.msg_edit, 2, 1)
@@ -411,10 +411,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(w)
         net_box = QGroupBox("网络 / 天气 / 昼夜")
         net_layout = QVBoxLayout(net_box)
-        self.sun_label = QLabel("日出/日落: --")
+        self.sun_label = QLabel("日出 / 日落: --")
         self.mode_label = QLabel("当前模式: --")
         self.auto_mode_check = QCheckBox("自动昼夜")
         self.auto_mode_check.setChecked(True)
+        self.auto_mode_check.toggled.connect(self.on_auto_mode_toggled)
 
         # 上半区 天气卡片在左 控制按钮组在右 按钮组与卡片在竖直方向居中对齐
         top_row = QHBoxLayout()
@@ -477,7 +478,7 @@ class MainWindow(QMainWindow):
 
         msg_row = QHBoxLayout()
         msg_row.addWidget(QLabel("文本"))
-        self.cd_msg_edit = QLineEdit("CONGRATULATIONS")
+        self.cd_msg_edit = QLineEdit("Congratulations")
         self.cd_msg_edit.setMaxLength(32)
         msg_row.addWidget(self.cd_msg_edit, 1)
         msg_row.addWidget(self.button("下发", self.cd_send_msg))
@@ -661,9 +662,22 @@ class MainWindow(QMainWindow):
 
     def toggle_connect(self):
         """连接或断开串口 切换按钮文字 启动或停止心跳定时器"""
-        if self.worker and self.worker.isRunning():
-            self.worker.close()
+        if self.state.connected:
+            self._auto_reconnect_pending = False
+            if self.worker and self.worker.isRunning():
+                # 先断开信号再关闭线程, 杜绝线程退出时排队的信号绕过 disconnect
+                old = self.worker
+                self._cleanup_serial_worker(old)
+                old.close()
+            self._apply_serial_state(False)
             return
+        self._auto_reconnect_pending = False
+        self._open_serial_worker()
+
+    def _open_serial_worker(self):
+        """创建串口后台线程并尝试打开当前端口"""
+        if self.worker and not self.worker.isRunning():
+            self._cleanup_serial_worker(self.worker)
         self.worker = SerialWorker()
         self.worker.line_received.connect(self.on_received)
         self.worker.connection_changed.connect(self.on_serial_state)
@@ -671,23 +685,65 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.on_serial_error)
         self.worker.open(self.port_combo.currentText(), int(self.baud_combo.currentText()))
 
+    def _cleanup_serial_worker(self, worker=None):
+        """断开旧串口线程信号并释放引用"""
+        worker = worker or self.worker
+        if not worker:
+            return
+        for signal, slot in (
+            (worker.line_received, self.on_received),
+            (worker.connection_changed, self.on_serial_state),
+            (worker.latency_updated, self.update_latency),
+            (worker.error, self.on_serial_error),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+        if worker is self.worker:
+            self.worker = None
+
     def on_serial_state(self, connected):
         """串口连接状态变化回调 更新 UI 按钮 心跳 主动查询当前状态"""
+        sender = self.sender()
+        if sender is not None and sender is not self.worker:
+            return
+        self._apply_serial_state(connected)
+
+    def _apply_serial_state(self, connected):
+        """应用串口状态；供线程信号和用户主动关闭共同调用。"""
         self.state.connected = connected
         self.state.online = connected
         self.connect_btn.setText("关闭" if connected else "打开")
         self.add_log("SYS", "已打开" if connected else "已关闭")
         if connected:
+            self._auto_reconnect_pending = False
             self.set_controls_enabled(True)
             self.heartbeat_timer.start(1000)
             self.last_pong_time = time.time()
             self.send_command("*GET:FORMAT")
+            self.send_command("*GET:MODE")
+            self.send_command("*GET:DISPLAY")
             self.send_command("*GET:ALARM")
             self.send_command("*GET:COUNTDOWN")
+            # 自动昼夜以 MCU 当前显示时间为准，串口一打开就立即读取并应用。
+            self.auto_daynight()
         else:
             self.heartbeat_timer.stop()
             self._cd_ring_timer.stop()
+            self.twin.clear_key_states()
+            self._pending_daynight = False
+            self.last_ping_time = None
+            self.last_pong_time = 0.0
+            self.state.latency_ms = 0
             self.latency_label.setText("延迟: -- ms")
+            self.set_controls_enabled(False)
+            if self._auto_reconnect_pending:
+                QTimer.singleShot(1500, self._auto_reconnect)
         self.update_connection_led()
         self.update_status()
 
@@ -697,9 +753,26 @@ class MainWindow(QMainWindow):
             return
         if self.last_pong_time and (time.time() - self.last_pong_time) > 3.0:
             self.state.online = False
+            self.set_controls_enabled(False)
             self.update_connection_led()
             self.update_status()
+            if not self._auto_reconnect_pending:
+                self._auto_reconnect_pending = True
+                self.add_log("ERR", "心跳超时，准备自动重连", popup=False)
+                if self.worker and self.worker.isRunning():
+                    self.worker.close()
+            return
         self.ping()
+
+    def _auto_reconnect(self):
+        """心跳超时后自动重试打开串口，直到成功或用户手动操作连接按钮"""
+        if not self._auto_reconnect_pending:
+            return
+        if self.worker and self.worker.isRunning():
+            return
+        self.refresh_ports()
+        self.add_log("SYS", "自动重连串口")
+        self._open_serial_worker()
 
     def send_command(self, line: str):
         """通过串口发送一行协议命令 非 ASCII 拒绝 离线时仅记录日志"""
@@ -772,8 +845,12 @@ class MainWindow(QMainWindow):
 
     def on_received(self, line: str):
         """收到串口行 分类记录日志并送入协议解析 异常不崩溃"""
+        sender = self.sender()
+        if sender is not None and sender is not self.worker:
+            return
         kind = "EVT" if line.startswith("*EVT:") else ("ERR" if line.startswith("ERROR") else "RX")
-        if self.show_heartbeat.isChecked() or not is_heartbeat(line):
+        hidden_key_state = line.startswith("*EVT:KEYSTATE")
+        if not hidden_key_state and (self.show_heartbeat.isChecked() or not is_heartbeat(line)):
             self.add_log(kind, f"<- {line}")
         try:
             self.handle_protocol_line(line)
@@ -799,6 +876,11 @@ class MainWindow(QMainWindow):
             return
         if line.startswith("*EVT:CD"):
             self.handle_cd_event(line)
+            return
+        if line.startswith("*EVT:KEYSTATE"):
+            tokens = line.split()
+            if len(tokens) == 3 and tokens[2] in ("DOWN", "UP"):
+                self.twin.set_key_pressed(tokens[1], tokens[2] == "DOWN")
             return
         if line.startswith("*EVT:KEY"):
             name = line.split()[-1]
@@ -832,6 +914,8 @@ class MainWindow(QMainWindow):
             return
         if line.startswith("ERROR"):
             self.status.showMessage(line)
+            if "BUSY" in line:
+                QMessageBox.warning(self, "MCU 忙碌", "MCU 正在本地编辑，暂时拒绝远程写入。")
             return
         if line.startswith("OK"):
             self.handle_ok(line)
@@ -843,10 +927,6 @@ class MainWindow(QMainWindow):
             return
         payload = parts[1].strip()
         upper = payload.upper()
-        cd_status = parse_cd_status_payload(payload)
-        if cd_status:
-            self.apply_cd_status(*cd_status)
-            return
         # FORMAT 应答 RIGHT 模式下 MCU 会把 LEFT 或 RIGHT 逆序成 TFEL 或 THGIR
         # 此时 PC 可能尚未同步 FORMAT 如首连引导 故两种朝向都识别
         if upper in ("LEFT", "TFEL"):
@@ -862,6 +942,10 @@ class MainWindow(QMainWindow):
         # 其它 GET 应答 文档规定 RIGHT 模式下整串逆序 按当前已知 FORMAT 还原
         if self.state.fmt == "RIGHT":
             payload = payload[::-1]
+        cd_status = parse_cd_status_payload(payload)
+        if cd_status:
+            self.apply_cd_status(*cd_status)
+            return
         # TIME 应答如 12 30 45 用于昼夜判断
         if self._pending_daynight:
             parts_dot = payload.split(".")
@@ -869,6 +953,10 @@ class MainWindow(QMainWindow):
                 self._pending_daynight = False
                 self._do_apply_daynight(int(parts_dot[0]), int(parts_dot[1]))
         tokens = payload.split()
+        if len(tokens) == 1 and tokens[0].upper() in ("DAY", "NIGHT"):
+            self.state.mode = tokens[0].upper()
+            self.update_status()
+            return
         if len(tokens) == 1 and len(tokens[0]) == 2 and all(c in "0123456789ABCDEF" for c in tokens[0].upper()):
             self.twin.update_leds(int(tokens[0], 16))
         elif len(tokens) == 1 and tokens[0].upper() in ("ON", "OFF"):
@@ -944,11 +1032,15 @@ class MainWindow(QMainWindow):
         fmt.setForeground(QColor(colors.get(kind, "#DDDDDD")))
         # %f 为 6 位微秒 裁掉末尾 4 个字符后补回 右括号 得到 3 位毫秒 即 fff
         stamp = dt.datetime.now().strftime("[%H:%M:%S.%f]")[:-4] + "]"
+        if kind in ("TX", "RX", "EVT", "ERR") and (text.startswith("->") or text.startswith("<-")):
+            display_text = text
+        else:
+            display_text = f"{kind} {text}"
         cursor = QTextCursor(self.log.document())
         cursor.movePosition(QTextCursor.End)
         cursor.setCharFormat(fmt)
         prefix = "" if self.log.document().isEmpty() else "\n"
-        cursor.insertText(f"{prefix}{stamp} {kind} {text}")
+        cursor.insertText(f"{prefix}{stamp} {display_text}")
         if at_bottom:
             scrollbar.setValue(scrollbar.maximum())
         else:
@@ -1030,7 +1122,8 @@ class MainWindow(QMainWindow):
             self.weather_temp.setText(f"{temp}°C")
             self.weather_desc.setText(f"{desc} ({cond})")
             self.weather_updated.setText(f"更新时间: {dt.datetime.now():%H:%M:%S}")
-            self.send_command(f"*SET:WEA {temp} {cond}")
+            if self.state.connected:
+                self.send_command(f"*SET:WEA {temp} {cond}")
             # 天气只更新卡片与收发日志 不写 events csv 文档 C8 仅定义 ALARM SYNC EDIT KEY 四类
             self.add_log("SYS", f"weather {temp}C {cond}")
         self.refresh_chart()
@@ -1045,6 +1138,11 @@ class MainWindow(QMainWindow):
         self.auto_mode_check.setChecked(False)
         self._last_daynight_mode = mode   # 手动强制后记下当前模式 供后续边沿判断
         self.send_command(f"*SET:MODE {mode}")
+
+    def on_auto_mode_toggled(self, checked: bool):
+        """重新启用自动昼夜时立即按 MCU 当前时间判断一次。"""
+        if checked:
+            self.auto_daynight()
 
     def apply_daynight(self):
         """手动应用昼夜按钮 先获取当前时间再根据日出日落判断下发"""
@@ -1070,7 +1168,7 @@ class MainWindow(QMainWindow):
 
     def auto_daynight(self):
         """每分钟自动检查昼夜 仅在复选框选中时生效 周期不强制下发"""
-        if not self.auto_mode_check.isChecked():
+        if not self.auto_mode_check.isChecked() or not self.state.connected:
             return
         # 周期检查不强制 仅在模式变化时下发
         self._daynight_force = False
@@ -1107,13 +1205,19 @@ class MainWindow(QMainWindow):
 
     def update_latency(self, ms: int):
         """更新延迟显示和状态栏"""
+        sender = self.sender()
+        if sender is not None and sender is not self.worker:
+            return
         self.state.latency_ms = ms
         self.latency_label.setText(f"延迟: {ms} ms")
         self.update_status()
 
     def on_serial_error(self, msg: str):
         """串口异常回调 记录错误日志并弹窗 禁用控件"""
-        self.add_log("ERR", msg, popup=True)
+        sender = self.sender()
+        if sender is not None and sender is not self.worker:
+            return
+        self.add_log("ERR", msg, popup=not self._auto_reconnect_pending)
         self.set_controls_enabled(False)
         self.status.showMessage(msg)
 
@@ -1136,7 +1240,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭时安全关闭串口线程"""
         if self.worker and self.worker.isRunning():
-            self.worker.close()
+            old_worker = self.worker
+            old_worker.close()
+            self._cleanup_serial_worker(old_worker)
         event.accept()
 
 
