@@ -13,22 +13,26 @@
 #include "gpio.h"
 #include "i2c.h"
 #include "pin_map.h"
+#include "pwm.h"
 #include "sysctl.h"
 #include "systick.h"
 #include "interrupt.h"
 #include "uart.h"
 #include "timer.h"
 
-#define SYS_CLOCK_HZ         20000000U
+#define SYS_CLOCK_HZ         16000000U
 #define SYSTICK_HZ           1000U
 #define UART_BAUD            115200U
 #define LINE_MAX             64    // §4 串口命令最大长度 不含回车换行
 #define DISP_LEN             8     // §2 数码管位数 共 8 位
 #define DISPLAY_TIMER_HZ     1000U // §2 定时器驱动数码管动态扫描 1ms 周期
 #define KEY_SCAN_TICKS       20U   // §3 每 20 次扫描中断采样一次 TCA 按键
-#define KEY_DEBOUNCE_COUNT   1U   // 需连续 1 次稳定采样才认边沿 防抖 20ms 与文档一致
+#define KEY_DEBOUNCE_COUNT   2U   // 每十毫秒确认一次 连续稳定二十毫秒后识别按键边沿
+#define EXT_SCAN_TICKS       5U   // EXT 独立 5ms 原始采样，累计稳定 20ms 后确认
+#define EXT_DEBOUNCE_SAMPLES 4U
 #define ADD_REPEAT_MS        200U
 #define FUNC_LONG_MS         800U
+#define EXT_RELEASE_CONFIRM_MS 80U // EXT 松开手势确认窗口，不改变基础 20ms 防抖
 #define SERIAL_LED_MS        100U
 #define WEATHER_VALID_MS     1800000UL
 
@@ -88,7 +92,7 @@ volatile uint8_t flag_5ms, flag_10ms, flag_100ms, flag_1s;
 
 // ============================ §4 串口接收 / 发送缓冲区 ============================
 volatile uint8_t rx_line_ready;     // 环形缓冲区中已完整接收的行数
-char cmd_line[LINE_MAX];            // 当前交给 Process_Command 解析的命令行
+char cmd_line[LINE_MAX + 1];        // 当前交给 Process_Command 解析的命令行
 static volatile bool g_line_too_long;
 
 #define RX_RING_SIZE 256U
@@ -152,6 +156,32 @@ static char     g_cd_active_msg[33] = "CONGRATULATIONS";
 static uint32_t g_cd_done_ms = 0;              // DONE 情景起始时刻 超时兜底
 static const char *CD_STATE_NAMES[5] = {"IDLE", "EDIT", "RUN", "PAUSE", "DONE"};
 
+// 小星星旋律 用于情景 1 音乐庆祝 音符靠拢蜂鸣器 2kHz 谐振点
+#define TWINKLE_COUNT 42
+static const uint16_t g_twinkle_freq[TWINKLE_COUNT] = {
+    1047,1047,1568,1568,1760,1760,1568,        // C6 C6 G6 G6 A6 A6 G6
+    1397,1397,1319,1319,1175,1175,1047,        // F6 F6 E6 E6 D6 D6 C6
+    1568,1568,1397,1397,1319,1319,1175,        // G6 G6 F6 F6 E6 E6 D6
+    1568,1568,1397,1397,1319,1319,1175,        // G6 G6 F6 F6 E6 E6 D6
+    1047,1047,1568,1568,1760,1760,1568,        // C6 C6 G6 G6 A6 A6 G6
+    1397,1397,1319,1319,1175,1175,1047         // F6 F6 E6 E6 D6 D6 C6
+};
+static const uint16_t g_twinkle_dur[TWINKLE_COUNT] = {
+    300,300,300,300,300,300,600,
+    300,300,300,300,300,300,600,
+    300,300,300,300,300,300,600,
+    300,300,300,300,300,300,600,
+    300,300,300,300,300,300,600,
+    300,300,300,300,300,300,600
+};
+
+// 情景 1 音乐播放器状态
+static bool     g_music_playing = false;    // 正在播放旋律
+static uint8_t  g_music_note = 0;           // 当前音符序号
+static uint32_t g_music_step_ms = 0;        // 当前步进起始时刻
+static bool     g_music_in_gap = false;     // 处于音符间静默
+static bool     g_pwm_configured = false;   // PK5 已配置为 M0PWM7 模式
+
 // ============================ §2 数码管显示状态 ============================
 uint8_t disp_buf[DISP_LEN];           // 每位显示的 ASCII 字符
 uint8_t disp_dp[DISP_LEN];            // 每位小数点状态 0 灭 1 亮
@@ -166,6 +196,9 @@ static bool g_led_override = false;
 static uint32_t g_led_override_ms = 0;   // 最后一次 *SET:LED 的时刻 用于 10s 自动退出接管
 
 static volatile uint8_t g_tca_key_raw = 0;        // 定时器中断中采样的 TCA 按键电平
+static volatile bool g_ext_debounced_pressed = false;
+static bool g_ext_sample_candidate = false;
+static uint8_t g_ext_sample_count = 0;
 static volatile uint8_t g_i2c_fail_count = 0;     // 连续 I2C 扫描失败计数
 static volatile uint16_t g_i2c_recover_count = 0; // I2C 总线恢复累计次数
 static uint16_t g_i2c_recover_reported = 0;
@@ -210,6 +243,9 @@ static bool g_func_armed = false;           // 编辑中按下 FUNC 暂不处理
 static bool g_user1_armed = false;
 static bool g_ext_armed = false;            // EXT 短按启动/暂停 长按停止 等抬起/长按再决定
 static bool g_ext_long = false;             // 本次 EXT 已触发长按 抬起时不再当短按处理
+static uint32_t g_ext_press_ms = 0;         // EXT 首次 DOWN 的时刻 不随后续毛刺刷新
+static bool g_ext_release_pending = false;  // EXT 检测到 UP 后等待确认 避免长按被毛刺拆段
+static uint32_t g_ext_release_ms = 0;
 
 #define KEY_EVQ_SIZE 16U
 static key_code_t g_evq_code[KEY_EVQ_SIZE];
@@ -251,6 +287,7 @@ static void Process_Command(char *line);
 static void Key_Scan(void);
 static key_event_t Key_GetEvent(key_code_t *out);
 static void Dispatch_Key(key_event_t ev, key_code_t code);
+static void Ext_Key_Service(void);
 static void Handle_Key(key_code_t key);
 static void Scroll_Set(const char *text, uint32_t dp_bitmap);
 static void Scroll_Tick(void);
@@ -278,6 +315,9 @@ static void Send_CD_Event(void);
 static void Countdown_Start(void);
 static void Countdown_Stop(void);
 static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc);
+static void Music_Start(void);
+static void Music_Stop(void);
+static void Music_Service(void);
 static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms);
 
 /* §1 SysTick 每 1ms 触发一次 递增全局节拍计数器并设置各时间片标志位
@@ -302,6 +342,7 @@ static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms)
 void TIMER0A_Handler(void)
 {
     static uint8_t key_div = 0;
+    static uint8_t ext_div = 0;
 
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
 
@@ -312,15 +353,44 @@ void TIMER0A_Handler(void)
         I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, (uint8_t)~g_led_byte);
     }
 
-    if (++key_div >= KEY_SCAN_TICKS) {
-        uint8_t tca = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
-        uint16_t raw = 0;
-        uint8_t i;
-        key_div = 0;
-        for (i = 0; i < 8; i++) {
-            if ((tca & (1U << i)) == 0) raw |= (1U << i);
+    key_div++;
+    ext_div++;
+    if (ext_div >= EXT_SCAN_TICKS) {
+        uint8_t tca1, tca2;
+        ext_div = 0;
+
+        // 每 5ms 双读一次；EXT 累计 4 个一致样本满足 20ms 防抖。
+        // SW1-7 仍只在原来的每 20ms 节点采纳一次，不改变原有识别逻辑。
+        tca1 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+        tca2 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+        if (tca1 == tca2) {
+            bool ext_pressed = (tca1 & (1U << (KEY_EXT - 1))) == 0U;
+
+            if (ext_pressed == g_ext_sample_candidate) {
+                if (g_ext_sample_count < EXT_DEBOUNCE_SAMPLES) {
+                    g_ext_sample_count++;
+                }
+            } else {
+                g_ext_sample_candidate = ext_pressed;
+                g_ext_sample_count = 1U;
+            }
+            if (g_ext_sample_count >= EXT_DEBOUNCE_SAMPLES) {
+                g_ext_debounced_pressed = g_ext_sample_candidate;
+            }
+
+            if (key_div >= KEY_SCAN_TICKS) {
+                uint8_t raw = 0;
+                uint8_t i;
+                for (i = 0; i < 7; i++) {
+                    if ((tca1 & (1U << i)) == 0U) raw |= (1U << i);
+                }
+                g_tca_key_raw = raw;
+            }
         }
-        g_tca_key_raw = (uint8_t)raw;
+        // 双读不一致时保留上一轮状态，不把 I2C 毛刺当作按键变化。
+        if (key_div >= KEY_SCAN_TICKS) {
+            key_div = 0;
+        }
     }
 }
 
@@ -472,6 +542,7 @@ int main(void)
             while ((e = Key_GetEvent(&k)) != KEV_NONE) {
                 Dispatch_Key(e, k);
             }
+            Ext_Key_Service();
 
             // 生成全局闪烁基准 500ms 周期方波 供编辑态高亮和 LED 慢闪复用
             g_blink_on = (((g_tick_ms / 500U) & 1U) == 0U);
@@ -500,9 +571,10 @@ int main(void)
         }
 
         Alarm_Service();
+        Music_Service();
 
         while (rx_line_ready) {
-            if (UART_GetLine(cmd_line, LINE_MAX)) {
+            if (UART_GetLine(cmd_line, sizeof(cmd_line))) {
                 Process_Command(cmd_line);
             } else {
                 break;
@@ -586,11 +658,9 @@ static void I2C0_Init(void)
     Display_Init();
 }
 
-/* I2C 时钟设为 200kHzTivaWare 标准 API 仅提供 100k/400k 两档
-   400k 在长走线 + 串口开关噪声下不可靠 100k 会吃掉 1ms 扫描预算的大部分
-   因此先用标准速率初始化 再手动改写时钟分频 MTPR 寄存器微调
-   SCL 计算公式 = SysClk / (2 * (SCL_LP + SCL_HP) * (TPR + 1))
-   其中 LP=6 HP=4 */
+// I2C 总线使用文档规定的 400 千赫兹速率
+// 系统时钟为十六兆赫兹时分频寄存器取一
+// 按标准模式十个时钟周期的高低电平总和计算得到 400 千赫兹
 static void I2C0_SetSpeed(void)
 {
     I2CMasterInitExpClk(I2C0_BASE, g_sys_clock, false);
@@ -1094,10 +1164,14 @@ static void Build_Display(void)
         } else if (g_cd_state == CD_DONE) {
             if(g_cd_scene==0){Scroll_Ensure(g_cd_active_msg,0);if(scroll_completed)Countdown_Stop();}
             else if(g_cd_scene==1){
-                if(g_blink_on){char dpy[9]="DONE    ";Display_SetStr(dpy,0x00);}
+                // 情景 1 音乐庆祝 数码管闪烁 TIME UP 旋律由蜂鸣器播放
+                // 按 FUNC 或长按 EXT 停止音乐并回到 IDLE
+                if(g_blink_on){char dpy[9]="TIME UP ";Display_SetStr(dpy,0x00);}
+                else Display_SetStr("        ",0x00);}
+            else{
+                // 情景 2 静默提醒 数码管闪烁 TIME UP 蜂鸣器不响
+                if(g_blink_on){char dpy[9]="TIME UP ";Display_SetStr(dpy,0x00);}
                 else Display_SetStr("        ",0x00);
-                if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
-            else{char dpy[9]="--00--  ";Display_SetStr(dpy,0x00);
                 if(Tick_TimedOut(g_cd_done_ms,10000U))Countdown_Stop();}
         } else { g_cd_state=CD_IDLE; }  // 状态值异常时回 IDLE
         // countdown 占用了显示 跳过天气/消息/时钟
@@ -1154,10 +1228,6 @@ static void Build_Display(void)
             if (scroll_completed) g_message_until_ms = 0;
         }
         return;
-    } else if (g_mode == MODE_NIGHT) {
-        // 夜间模式仅显示时和分 4 位 其余空白
-        snprintf(text, sizeof(text), "%02u%02u    ", g_time.h, g_time.mi);
-        dp = 0x02;
     } else if (g_edit_state == ST_EDIT_DATE) {
         // 编辑日期态 显示编辑值 yy.mm.dd
         snprintf(text, sizeof(text), "%02u%02u%02u  ",
@@ -1184,6 +1254,11 @@ static void Build_Display(void)
         snprintf(text, sizeof(text), "%02u%02u%02u  ",
                  g_edit_time.h, g_edit_time.mi, g_edit_time.s);
         dp = 0x0a;
+    } else if (g_mode == MODE_NIGHT) {
+        // 夜间模式只限制空闲状态下的时间主界面
+        // 日期 年份 编辑和临时显示仍按原有内容完整显示
+        snprintf(text, sizeof(text), "%02u%02u    ", g_time.h, g_time.mi);
+        dp = 0x02;
     } else {
         // 默认 时钟走时态 显示当前时间 hh.mm.ss
         snprintf(text, sizeof(text), "%02u%02u%02u  ", g_time.h, g_time.mi, g_time.s);
@@ -1285,6 +1360,9 @@ static void Key_Scan(void)
 {
     // 从定时器 ISR 采样的 TCA 原始电平读取 8 个 I2C 按键
     uint16_t raw = g_tca_key_raw;
+    uint16_t normal_raw;
+    uint16_t next_stable;
+    uint16_t ext_mask = (uint16_t)(1U << (KEY_EXT - 1));
     uint32_t pj;
     uint8_t b;
 
@@ -1292,21 +1370,31 @@ static void Key_Scan(void)
     pj = GPIOPinRead(GPIO_PORTJ_BASE, GPIO_PIN_0 | GPIO_PIN_1);
     if ((pj & GPIO_PIN_0) == 0) raw |= (1U << (KEY_USER1 - 1));
     if ((pj & GPIO_PIN_1) == 0) raw |= (1U << (KEY_USER2 - 1));
+    normal_raw = (uint16_t)(raw & ~ext_mask);
 
-    // 软件去抖 连续采样若干次稳定后才视为有效
-    if (raw == g_key_last_raw) {
+    // 普通按键每十毫秒检查一次 连续稳定二十毫秒后更新状态
+    if (normal_raw == g_key_last_raw) {
         if (g_key_same_count < 3) g_key_same_count++;
     } else {
         g_key_same_count = 0;
-        g_key_last_raw = raw;
+        g_key_last_raw = normal_raw;
     }
 
-    // 去抖通过后 检测上升沿/下降沿 推入事件队列
+    next_stable = g_key_stable;
     if (g_key_same_count >= KEY_DEBOUNCE_COUNT) {
+        next_stable = (uint16_t)((next_stable & ext_mask) | normal_raw);
+    }
+
+    // EXT 已由五毫秒采样累计四次完成二十毫秒独立防抖
+    if (g_ext_debounced_pressed) next_stable |= ext_mask;
+    else next_stable &= (uint16_t)~ext_mask;
+
+    // 检测防抖后的上升沿和下降沿并推入事件队列
+    if (next_stable != g_key_stable) {
         uint16_t prev = g_key_stable;
-        uint16_t pressed = (uint16_t)(raw & ~prev);      // 新按下的位
-        uint16_t released = (uint16_t)(~raw & prev);     // 新释放的位
-        g_key_stable = raw;
+        uint16_t pressed = (uint16_t)(next_stable & ~prev);
+        uint16_t released = (uint16_t)(~next_stable & prev);
+        g_key_stable = next_stable;
 
         for (b = 0; b < KEY_COUNT; b++) {
             key_code_t code = (key_code_t)(b + 1);
@@ -1347,10 +1435,10 @@ static void Key_Scan(void)
    FUNC 和 USER1 采用延迟判断 按下时暂存 等抬起或长按后再决定短按/长按动作 */
 static void Dispatch_Key(key_event_t ev, key_code_t code)
 {
-    // 镜像显示使用独立边沿事件，不改变文档规定的 *EVT:KEY 业务事件语义。
-    if (ev == KEV_DOWN) {
+    // EXT 的 UP 需经过专用确认，其余按键仍沿用原有边沿上报。
+    if (code != KEY_EXT && ev == KEV_DOWN) {
         Send_Key_State_Event(code, true);
-    } else if (ev == KEV_UP) {
+    } else if (code != KEY_EXT && ev == KEV_UP) {
         Send_Key_State_Event(code, false);
     }
 
@@ -1385,9 +1473,9 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 }
             } else if (ev == KEV_UP) {
                 if (g_func_armed) {
-                    if (g_cd_state != CD_DONE) {
-                        Handle_Key(KEY_FUNC); // 短按 循环切换编辑字段或状态
-                    }
+                    // CD_DONE 下短按 FUNC 停止倒计时 三个情景均适用
+                    // 非 CD_DONE 下短按 FUNC 循环切换编辑字段或状态
+                    Handle_Key(KEY_FUNC);
                     g_func_armed = false;
                 }
             }
@@ -1424,26 +1512,29 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
             }
             break;
         case KEY_EXT:
-            // 短按 启动/暂停/继续(走 Countdown_HandleKey) 长按 停止/取消倒计时
+            // 短按 启动/暂停/继续 长按 停止/取消倒计时
+            // 保留公共 20ms 防抖，仅对松开增加手势确认，防止长按被假 UP 拆成多次短按。
             if (ev == KEV_DOWN) {
-                Send_Key_Event(KEY_EXT);  // 保留 §3.7 EXT 触发 *EVT:KEY EXT
-                g_ext_armed = true;
-                g_ext_long = false;
+                if (g_ext_release_pending) {
+                    // 确认窗口内重新按下视为接触毛刺，继续首次按压的长按计时。
+                    g_ext_release_pending = false;
+                    g_key_press_ms[(uint8_t)(KEY_EXT - 1)] = g_ext_press_ms;
+                } else if (!g_ext_armed && !g_ext_long) {
+                    Send_Key_Event(KEY_EXT);
+                    Send_Key_State_Event(KEY_EXT, true);
+                    g_ext_press_ms = g_key_press_ms[(uint8_t)(KEY_EXT - 1)];
+                    g_ext_armed = true;
+                }
             } else if (ev == KEV_LONG) {
-                // 同一次物理按压在 KEV_DOWN 已上报过一次 EVT KEY EXT
-                // 长按不再重复上报 仅执行停止倒计时 避免 PC LOG 多出一次 EXT
-                if (g_ext_armed) {
+                if (g_ext_armed && !g_ext_long) {
                     if (g_cd_state != CD_IDLE) Countdown_Stop();
                     g_ext_armed = false;
-                    g_ext_long = true;  // 标记本次为长按 抬起时不再当短按进编辑
+                    g_ext_long = true;
                 }
             } else if (ev == KEV_UP) {
-                // 长按已处理过就直接清标记 不再走短按 避免抬起又进入倒计时编辑
-                if (g_ext_long) {
-                    g_ext_long = false;
-                } else if (g_ext_armed) {
-                    Handle_Key(KEY_EXT);
-                    g_ext_armed = false;
+                if (g_ext_armed || g_ext_long) {
+                    g_ext_release_pending = true;
+                    g_ext_release_ms = g_tick_ms;
                 }
             }
             break;
@@ -1453,6 +1544,30 @@ static void Dispatch_Key(key_event_t ev, key_code_t code)
                 Handle_Key(code);
             }
             break;
+    }
+}
+
+static void Ext_Key_Service(void)
+{
+    if (!g_ext_release_pending ||
+        !Tick_TimedOut(g_ext_release_ms, EXT_RELEASE_CONFIRM_MS)) {
+        return;
+    }
+
+    g_ext_release_pending = false;
+    Send_Key_State_Event(KEY_EXT, false);
+
+    if (g_ext_long) {
+        g_ext_long = false;
+        g_ext_armed = false;
+        return;
+    }
+
+    if (g_ext_armed) {
+        if (Tick_TimedOut(g_ext_press_ms, 30U)) {
+            Handle_Key(KEY_EXT);
+        }
+        g_ext_armed = false;
     }
 }
 
@@ -1649,7 +1764,10 @@ static void Time_Tick_1s(void)
             if (g_cd_scene == 0) {
                 Scroll_Ensure(g_cd_active_msg, 0);
             }
-            if (g_cd_scene != 2 && g_mode != MODE_NIGHT) {
+            if (g_cd_scene == 1) {
+                // 情景 1 音乐庆祝 启动旋律替代蜂鸣器节奏响铃
+                Music_Start();
+            } else if (g_cd_scene != 2 && g_mode != MODE_NIGHT) {
                 g_alarm.ringing = 1; g_alarm_ring_start_ms = g_tick_ms;
                 g_alarm_last_beep_ms = 0; g_ring_limit_ms = 10000U;
             }
@@ -1815,12 +1933,120 @@ static void Countdown_Start(void)
     Send_CD_Event();
 }
 
-// 停止/取消倒计时 回到 IDLE 同时止住可能的到点响铃 LED/显示随之恢复
+// 停止音乐播放 恢复 PK5 为 GPIO 输出模式 供闹钟和远程蜂鸣正常使用
+static void Music_Stop(void)
+{
+    if (!g_music_playing) return;
+    g_music_playing = false;
+    g_music_note = 0;
+    g_music_in_gap = false;
+    // 关闭 PWM 输出并切回 GPIO 模式
+    if (g_pwm_configured) {
+        PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, false);
+        GPIOPinTypeGPIOOutput(GPIO_PORTK_BASE, GPIO_PIN_5);
+        GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+        g_pwm_configured = false;
+    }
+}
+
+// 启动情景 1 音乐播放 配置 PK5 为 M0PWM7 从第一音符开始
+static void Music_Start(void)
+{
+    if (g_music_playing) return;
+    // 首次调用时使能 PWM0 并配置引脚
+    if (!g_pwm_configured) {
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+        while (!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0)) { }
+        GPIOPinConfigure(GPIO_PK5_M0PWM7);
+        GPIOPinTypePWM(GPIO_PORTK_BASE, GPIO_PIN_5);
+        PWMGenConfigure(PWM0_BASE, PWM_GEN_3,
+                        PWM_GEN_MODE_UP_DOWN | PWM_GEN_MODE_NO_SYNC);
+        PWMGenEnable(PWM0_BASE, PWM_GEN_3);
+        g_pwm_configured = true;
+    }
+    g_music_playing = true;
+    g_music_note = 0;
+    g_music_in_gap = false;
+    // 立即播放第一个音符
+    {
+        uint32_t load = SYS_CLOCK_HZ / g_twinkle_freq[0] - 1U;
+        PWMGenPeriodSet(PWM0_BASE, PWM_GEN_3, load);
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_7, load / 2U);
+        PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, true);
+    }
+    g_music_step_ms = g_tick_ms;
+}
+
+// 音乐步进服务 每主循环调用一次 非阻塞状态机驱动旋律播放
+// 每个音符分 ON 时段和静默 GAP 时段 播放完毕自动从头循环
+// 闹钟或远程蜂鸣介入时 临时切回 GPIO 模式供 Alarm_Service 使用
+// 报警结束后由 Music_Service 自动恢复 PWM 模式和当前音符
+static void Music_Service(void)
+{
+    uint32_t load;
+    uint32_t elapsed;
+    uint32_t dur;
+    if (!g_music_playing) return;
+    if (g_cd_state != CD_DONE) { Music_Stop(); return; }
+    // 闹钟和远程蜂鸣优先于音乐 临时切回 GPIO 让 Alarm_Service 控制蜂鸣器
+    if (g_alarm.ringing || g_remote_beep_active) {
+        if (g_pwm_configured) {
+            PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, false);
+            GPIOPinTypeGPIOOutput(GPIO_PORTK_BASE, GPIO_PIN_5);
+            GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
+            g_pwm_configured = false;
+        }
+        return;
+    }
+    // 报警解除后重建 PWM 模式继续播放
+    if (!g_pwm_configured) {
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+        while (!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0)) { }
+        GPIOPinConfigure(GPIO_PK5_M0PWM7);
+        GPIOPinTypePWM(GPIO_PORTK_BASE, GPIO_PIN_5);
+        PWMGenConfigure(PWM0_BASE, PWM_GEN_3,
+                        PWM_GEN_MODE_UP_DOWN | PWM_GEN_MODE_NO_SYNC);
+        PWMGenEnable(PWM0_BASE, PWM_GEN_3);
+        g_pwm_configured = true;
+        // 从头播放当前音符
+        g_music_in_gap = false;
+        g_music_step_ms = g_tick_ms;
+        load = SYS_CLOCK_HZ / g_twinkle_freq[g_music_note] - 1U;
+        PWMGenPeriodSet(PWM0_BASE, PWM_GEN_3, load);
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_7, load / 2U);
+        PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, true);
+        return;
+    }
+    elapsed = g_tick_ms - g_music_step_ms;
+    dur = g_twinkle_dur[g_music_note];
+    if (!g_music_in_gap) {
+        if (elapsed >= dur) {
+            PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, false);
+            g_music_in_gap = true;
+            g_music_step_ms = g_tick_ms;
+        }
+    } else {
+        // 音符间静默 80ms 保证相邻同音高音符不粘连
+        if (elapsed >= 80U) {
+            g_music_note++;
+            if (g_music_note >= TWINKLE_COUNT) g_music_note = 0;
+            g_music_in_gap = false;
+            g_music_step_ms = g_tick_ms;
+            load = SYS_CLOCK_HZ / g_twinkle_freq[g_music_note] - 1U;
+            PWMGenPeriodSet(PWM0_BASE, PWM_GEN_3, load);
+            PWMPulseWidthSet(PWM0_BASE, PWM_OUT_7, load / 2U);
+            PWMOutputState(PWM0_BASE, PWM_OUT_7_BIT, true);
+        }
+    }
+}
+
+// 停止/取消倒计时 回到 IDLE 同时止住可能的到点响铃和音乐 LED/显示随之恢复
 static void Countdown_Stop(void)
 {
     bool was_done = (g_cd_state == CD_DONE);
     g_cd_state = CD_IDLE;
     g_cd_remain_s = 0;
+    Music_Stop();  // 情景 1 音乐播放同步终止
     if (was_done && g_alarm.ringing) {
         g_alarm.ringing = 0;
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
@@ -2040,10 +2266,11 @@ static uint8_t Startup_Led_Mask(const char *s)
     return m;
 }
 
-/* 开机画面初始化 标记激活并复位状态机
-   在主循环前调用一次 实际显示由 Startup_Tick 在 10ms tick 中步进
-   每阶段 900ms(500亮+100灭+300亮) 闪烁1次 版本号阶段 1000ms 无闪烁
-   总时长约 3*900+1000=3700ms 符合 4-8s 范围 */
+// 开机画面初始化并复位状态机
+// 前三个阶段每段一千毫秒
+// 每段先亮五百毫秒再灭一百毫秒最后亮四百毫秒
+// 版本号显示一千毫秒
+// 开机画面总时长约四秒
 static void Startup_Init(void)
 {
     g_startup_active = true;
@@ -2085,7 +2312,7 @@ static void Startup_Tick(void)
         return;
     }
 
-    // 闪烁阶段 亮 500ms → 灭 100ms → 亮 300ms → 下一阶段
+    // 闪烁阶段先亮五百毫秒再灭一百毫秒最后亮四百毫秒
     if (g_startup_step == 0U) {
         Display_SetStr(text, dp);
         Set_LED(Startup_Led_Mask(text));
@@ -2111,8 +2338,8 @@ static void Startup_Tick(void)
         }
         return;
     }
-    // step 3 二次显示 300ms 后进入下一阶段
-    if (elapsed >= 300U) {
+    // 第二次点亮四百毫秒后进入下一阶段
+    if (elapsed >= 400U) {
         g_startup_phase++;
         g_startup_step = 0U;
         g_startup_step_ms = g_tick_ms;
@@ -2225,6 +2452,7 @@ static void Process_Command(char *line)
         g_alarm.t.h = 0; g_alarm.t.mi = 0; g_alarm.t.s = 0;
         g_alarm.enabled = 0; g_alarm.ringing = 0;
         g_remote_beep_active = false; g_alarm_beep_on = 0;  // 关闭蜂鸣器
+        Music_Stop();  // 先停止音乐恢复 PK5 GPIO 模式 再写 GPIO
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         disp_on = 1; g_format = FMT_LEFT; g_mode = MODE_DAY; g_display_mode = DISP_TIME;
         g_led_override = false;

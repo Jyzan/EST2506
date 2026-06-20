@@ -2,6 +2,7 @@
 import datetime as dt
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,6 +181,10 @@ class MainWindow(QMainWindow):
         self.net_worker = None
         self.last_ping_time = None
         self.last_pong_time = 0.0
+        self._manual_ping_pending = False
+        self._pending_commands = deque()
+        self._ntp_sync_ctx = None
+        self._last_weather = None
         self.store = EventStore(str(Path(__file__).resolve().parent / "events.csv"))
         self.log_lines = 0
         self.tts = TtsSpeaker()
@@ -225,7 +230,7 @@ class MainWindow(QMainWindow):
         self.latency_label = self.ui.latency_label
         self.ui.refresh_btn.clicked.connect(self.refresh_ports)
         self.connect_btn.clicked.connect(self.toggle_connect)
-        self.ui.ping_btn.clicked.connect(self.ping)
+        self.ui.ping_btn.clicked.connect(lambda: self.ping(manual=True))
 
         splitter = QSplitter()
         mirror_box = QGroupBox("MCU 镜像")
@@ -470,7 +475,7 @@ class MainWindow(QMainWindow):
         scene_row = QHBoxLayout()
         scene_row.addWidget(QLabel("情景"))
         self.cd_scene_combo = QComboBox()
-        self.cd_scene_combo.addItems(["滚动文本", "闪烁庆祝", "静默"])
+        self.cd_scene_combo.addItems(["消息播报", "音乐庆祝", "静默提醒"])
         self.cd_scene_combo.currentIndexChanged.connect(
             lambda i: self.send_command(f"*SET:COUNTDOWN SCENE {i}"))
         scene_row.addWidget(self.cd_scene_combo, 1)
@@ -503,7 +508,7 @@ class MainWindow(QMainWindow):
         return box
 
     def cd_send_msg(self):
-        """将消息文本下发到 MCU 同时切到滚动文本情景"""
+        """将消息文本下发到 MCU 同时切到消息播报情景"""
         self.cd_scene_combo.blockSignals(True)
         self.cd_scene_combo.setCurrentIndex(0)
         self.cd_scene_combo.blockSignals(False)
@@ -730,6 +735,9 @@ class MainWindow(QMainWindow):
             self.send_command("*GET:DISPLAY")
             self.send_command("*GET:ALARM")
             self.send_command("*GET:COUNTDOWN")
+            if self._last_weather is not None:
+                temp, cond = self._last_weather
+                self.send_command(f"*SET:WEA {temp} {cond}")
             # 自动昼夜以 MCU 当前显示时间为准，串口一打开就立即读取并应用。
             self.auto_daynight()
         else:
@@ -737,6 +745,9 @@ class MainWindow(QMainWindow):
             self._cd_ring_timer.stop()
             self.twin.clear_key_states()
             self._pending_daynight = False
+            self._manual_ping_pending = False
+            self._pending_commands.clear()
+            self._ntp_sync_ctx = None
             self.last_ping_time = None
             self.last_pong_time = 0.0
             self.state.latency_ms = 0
@@ -762,7 +773,7 @@ class MainWindow(QMainWindow):
                 if self.worker and self.worker.isRunning():
                     self.worker.close()
             return
-        self.ping()
+        self.ping(manual=False)
 
     def _auto_reconnect(self):
         """心跳超时后自动重试打开串口，直到成功或用户手动操作连接按钮"""
@@ -774,7 +785,7 @@ class MainWindow(QMainWindow):
         self.add_log("SYS", "自动重连串口")
         self._open_serial_worker()
 
-    def send_command(self, line: str):
+    def send_command(self, line: str, manual_heartbeat=True):
         """通过串口发送一行协议命令 非 ASCII 拒绝 离线时仅记录日志"""
         line = line.strip()
         if not line:
@@ -782,11 +793,18 @@ class MainWindow(QMainWindow):
         if any(ord(ch) > 127 for ch in line):
             QMessageBox.warning(self, "仅限 ASCII", "协议文本必须为 ASCII 字符。")
             return
-        # 发送侧同样过滤心跳 PING 为 1Hz 保活 关闭显示心跳时与 PONG 一同隐藏
-        if self.show_heartbeat.isChecked() or not is_heartbeat(line):
+        command = line.split(maxsplit=1)[0].lstrip("*").upper()
+        manual_ping = manual_heartbeat and command == "PING"
+        # 自动 1Hz PING 默认过滤；按钮和协议页手动发送的 PING 始终显示。
+        if manual_ping or self.show_heartbeat.isChecked() or not is_heartbeat(line):
             self.add_log("TX", f"-> {line}")
         if self.worker and self.worker.isRunning():
+            if manual_ping:
+                self._manual_ping_pending = True
+                self.last_ping_time = time.time()
             self.worker.write_line(line)
+            if command != "PING":
+                self._pending_commands.append(line)
             self._request_state_after_set(line)
         else:
             self.add_log("ERR", "not connected", popup=False)
@@ -850,7 +868,10 @@ class MainWindow(QMainWindow):
             return
         kind = "EVT" if line.startswith("*EVT:") else ("ERR" if line.startswith("ERROR") else "RX")
         hidden_key_state = line.startswith("*EVT:KEYSTATE")
-        if not hidden_key_state and (self.show_heartbeat.isChecked() or not is_heartbeat(line)):
+        manual_pong = line.startswith("*PONG") and self._manual_ping_pending
+        if not hidden_key_state and (
+            manual_pong or self.show_heartbeat.isChecked() or not is_heartbeat(line)
+        ):
             self.add_log(kind, f"<- {line}")
         try:
             self.handle_protocol_line(line)
@@ -861,6 +882,7 @@ class MainWindow(QMainWindow):
     def handle_protocol_line(self, line: str):
         """协议行分发 按前缀匹配 PONG EVT DISP LED CD KEY EDIT ALARM MODE ERROR OK"""
         if line.startswith("*PONG"):
+            self._manual_ping_pending = False
             self.last_pong_time = time.time()
             self.state.online = True
             if self.last_ping_time:
@@ -897,13 +919,16 @@ class MainWindow(QMainWindow):
             self.refresh_chart()
             return
         if line.startswith("*EVT:ALARM"):
-            self.state.alarm = "ON" if line.strip() == "*EVT:ALARM" else "OFF"
             # 仅在真正响铃时记一条 ALARM 事件 data 写触发时刻 时分秒 符合 C8 规范
             # 关闭报告不是一次触发事件 不写入 events csv
             if line.strip() == "*EVT:ALARM":
+                self.state.alarm = "ON"
                 self.store.append("ALARM", dt.datetime.now().strftime("%H.%M.%S"))
                 self.refresh_chart()
                 QMessageBox.information(self, "闹钟", "S800 闹钟正在响铃。")
+            else:
+                # 停止响铃不等于关闭闹钟 重新查询使能状态后更新状态栏
+                self.send_command("*GET:ALARM")
             return
         if line.startswith("*EVT:MODE"):
             if "NIGHT" in line:
@@ -913,12 +938,55 @@ class MainWindow(QMainWindow):
             self.update_status()
             return
         if line.startswith("ERROR"):
+            command = self._pending_commands.popleft() if self._pending_commands else ""
+            self._handle_ntp_response(command, False, line)
             self.status.showMessage(line)
             if "BUSY" in line:
                 QMessageBox.warning(self, "MCU 忙碌", "MCU 正在本地编辑，暂时拒绝远程写入。")
             return
         if line.startswith("OK"):
+            command = self._pending_commands.popleft() if self._pending_commands else ""
+            self._handle_ntp_response(command, True, line)
             self.handle_ok(line)
+
+    def _handle_ntp_response(self, command: str, success: bool, response: str):
+        """按 DATE TIME NTP SYNC 顺序确认应答 全部成功后记录同步事件"""
+        ctx = self._ntp_sync_ctx
+        if not ctx or not command:
+            return
+
+        stage = ctx["stage"]
+        upper = command.upper()
+        expected = (
+            stage == "date" and upper.startswith("*SET:DATE")
+            or stage == "time" and upper.startswith("*SET:TIME")
+            or stage == "mark" and upper.startswith("*NTP")
+        )
+        if not expected:
+            return
+
+        if not success:
+            self.add_log("ERR", f"NTP 对时中止: {response}", popup=False)
+            self._ntp_sync_ctx = None
+            return
+
+        now = ctx["now"]
+        if stage == "date":
+            ctx["stage"] = "time"
+            self.send_command(
+                f"*SET:TIME HOUR MIN SEC {now.hour:02d} {now.minute:02d} {now.second:02d}"
+            )
+        elif stage == "time":
+            ctx["stage"] = "mark"
+            self.send_command("*NTP SYNC")
+        else:
+            self.store.append("SYNC", f"delta {ctx['delta_ms']}")
+            self.add_log(
+                "SYS",
+                f"NTP sync {ctx['server']} delta {ctx['delta_ms']} ms",
+            )
+            self._ntp_sync_ctx = None
+            self.refresh_chart()
 
     def handle_ok(self, line: str):
         """解析 OK 应答 按载荷内容分派到倒计时状态 FORMAT 还原 LED 更新 显示开关 闹钟状态"""
@@ -1048,12 +1116,12 @@ class MainWindow(QMainWindow):
         if popup and kind == "ERR":
             QMessageBox.warning(self, "错误", text)
 
-    def ping(self):
+    def ping(self, manual=True):
         """发送 PING 命令记录发送时刻用于延迟计算"""
         if not (self.worker and self.worker.isRunning()):
             return
         self.last_ping_time = time.time()
-        self.send_command("*PING")
+        self.send_command("*PING", manual_heartbeat=manual)
 
     def _clamp_day_range(self):
         """根据年月联动更新日字段上限 处理闰年和非闰年二月"""
@@ -1091,6 +1159,9 @@ class MainWindow(QMainWindow):
 
     def ntp_sync(self):
         """启动后台 NTP 对时线程 防止重复启动"""
+        if self._ntp_sync_ctx is not None:
+            self.add_log("SYS", "NTP 对时正在等待 MCU 确认")
+            return
         if self.net_worker and self.net_worker.isRunning():
             return
         self.net_worker = NetworkWorker("ntp")
@@ -1111,13 +1182,19 @@ class MainWindow(QMainWindow):
         """网络请求完成回调 NTP 则下发时间并写 SYNC 事件 天气则更新卡片并下发 MCU"""
         if kind == "ntp":
             now, delta_ms, server = data
+            if not self.state.connected:
+                self.add_log("ERR", "NTP 时间已获取，但串口尚未连接", popup=True)
+                return
+            self._ntp_sync_ctx = {
+                "stage": "date",
+                "now": now,
+                "delta_ms": delta_ms,
+                "server": server,
+            }
             self.send_command(f"*SET:DATE YEAR MONTH DATE {now.year:04d} {now.month:02d} {now.day:02d}")
-            self.send_command(f"*SET:TIME HOUR MIN SEC {now.hour:02d} {now.minute:02d} {now.second:02d}")
-            self.send_command("*NTP SYNC")
-            self.store.append("SYNC", f"delta {delta_ms}")
-            self.add_log("SYS", f"NTP sync {server} delta {delta_ms} ms")
         elif kind == "weather":
             temp, cond, desc = data
+            self._last_weather = (temp, cond)
             self.weather_icon.setText(self.WEATHER_ICONS.get(cond, "?"))
             self.weather_temp.setText(f"{temp}°C")
             self.weather_desc.setText(f"{desc} ({cond})")
@@ -1217,7 +1294,13 @@ class MainWindow(QMainWindow):
         sender = self.sender()
         if sender is not None and sender is not self.worker:
             return
-        self.add_log("ERR", msg, popup=not self._auto_reconnect_pending)
+        was_reconnecting = self._auto_reconnect_pending
+        self.add_log("ERR", msg, popup=not was_reconnecting)
+        # 已连接后的读写异常通常表示设备拔出或串口失效
+        # 进入与心跳超时相同的自动重连流程
+        # 首次打开失败也会在重连状态下继续定时尝试
+        if msg.startswith("串口通信异常") or self._auto_reconnect_pending:
+            self._auto_reconnect_pending = True
         self.set_controls_enabled(False)
         self.status.showMessage(msg)
 

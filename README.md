@@ -1,93 +1,79 @@
-# S800 智能联网时钟系统 — MCU 端
+# S800 智能联网时钟系统
 
-## 目录结构
+基于 TI TM4C1294NCPDT 和 Python PyQt5 的智能时钟课程项目。S800 板可独立完成时钟、日期、闹钟和按键设置，PC 上位机通过 USB 虚拟串口提供控制、状态监视与数字孪生界面。
 
-```
-mcu/
-├── Driverlib/          # TivaWare 硬件驱动库
-├── Inc/                # 共用头文件
-├── src/
-│   └── main.c          # 自编代码集中于此
-└── obj/
-    └── exp.axf         # 编译产物，可直接烧写
+> 系统设计、协议说明、扩展功能和演示内容见对应简介 PDF。
 
+## 项目结构
+
+```text
+.
+├── mcu/
+│   ├── Inc/                            芯片头文件
+│   ├── Driverlib/                      TivaWare 驱动库
+│   ├── src/main.c                      MCU 自编程序
+│   └── obj/exp.axf                     UniFlash 烧写文件
+├── pc_host/
+│   ├── main.py                         程序入口与业务控制
+│   ├── astral_helper.py                昼夜模式计算
+│   ├── chart_widget.py                 数据看板组件
+│   ├── log_store.py                    事件数据存储
+│   ├── ntp_helper.py                   NTP 网络对时
+│   ├── protocol.py                     串口协议解析
+│   ├── serial_worker.py                后台串口通信
+│   ├── twin_panel.py                   数字孪生组件
+│   ├── ui_main_window.py               PyQt 主窗口界面类
+│   ├── weather_helper.py               天气获取与转换
+│   ├── main_window.ui                  Qt Designer 界面文件
+│   └── requirements.txt                Python 依赖
+├── docs/
+│   ├── 大作业524442910013-江彦佐.pdf    简介文档
+│   └── 演示视频.mp4
+└── README.md                           烧写与运行说明
 ```
 
 ## 开发环境
 
-| 项目 | 说明 |
-|------|------|
-| IDE | Keil uVision 5 |
-| 芯片 | TI TM4C1294NCPDT |
-| 依赖库 | TivaWare |
+- Windows 10 或 Windows 11
+- Code Composer Studio UniFlash
+- TI TM4C1294NCPDT 开发板
+- Python 3.11.9
+- PyQt5 5.15.9、pyserial 3.5
+- 串口参数：115200，8N1，无流控
 
-## 烧写
+## MCU 烧写
 
-`obj/exp.axf` 为已编译完成的固件，可直接烧写，无需重新编译。
-1. 用 Micro-USB 线连接 S800 板到 PC
-2. 打开 Keil uVision 5，菜单 **Flash → Download (F8)**，在文件选择对话框中选中 `obj/exp.axf`
-3. 按板上的 **RESET** 键运行
+使用 UniFlash 烧写 `mcu/obj/exp.axf`：
 
-## 硬件资源
+1. 使用 Micro USB 连接 S800 板并打开 UniFlash。
+2. 在主界面展开 `New Configuration`。
+3. 在 `Enter Device Name` 中输入 `TM4C1294NCPDT`，选择 `TIVA TM4C1294NCPDT`。
+4. 确认 `Selected Connection` 为 `Stellaris In-Circuit Debug Interface`，然后点击 `Start`。
+5. 在左侧选中 `Program`，在 `Load Image` 中点击 `Browse`。
+6. 将文件类型切换为 `All Files (*.*)`，选择项目中的 `mcu/obj/exp.axf`。
+7. 可勾选 `Run Target After Program Load/Flash Operation`，使程序烧写后自动运行。
+8. 控制台出现绿色的 `[SUCCESS] Program Load completed successfully.` 即表示烧写成功。
 
-| 资源 | 用途 |
-|------|------|
-| 8 位 I2C 七段数码管 | 时间 / 日期 / 消息显示 |
-| 8 位 I2C 按键 | 本地设置（FUNC SHIFT ADD SAVE DISP SPEED FORMAT EXT）|
-| GPIO USER1 / USER2 | NTP 对时请求 / 天气短显 |
-| 8 位 LED | 心跳 / 闹钟 / 编辑 / 收发 / 天气 / NTP 指示 |
-| 蜂鸣器 (PK5) | 闹钟响铃 / 远程蜂鸣 / 倒计时完成 |
+## PC 上位机安装与运行
 
-## 按键映射
+在项目根目录按所用终端执行。
 
-| 按键 | 短按 | 长按 |
-|------|------|------|
-| FUNC | 编辑模式循环切换；响铃中关闹钟 | 保存并退出（等效 SAVE）|
-| SHIFT | 编辑中切换高亮字段 | — |
-| ADD | 当前字段 +1 | 连加（≥5 Hz）|
-| SAVE | 保存并退出编辑 | — |
-| DISP | 时间 → 日期 → 年份 循环 | — |
-| SPEED | 流水速度 2 级切换 | — |
-| FORMAT | 流水方向 LEFT / RIGHT | — |
-| EXT | 预留键，上报 EVT KEY EXT | — |
-| USER1 | 请求 PC 对时 | NTP 同步状态短显 |
-| USER2 | 天气短显 5 秒 | — |
+PowerShell：
+```powershell
+cd pc_host
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python main.py
+```
 
-## LED 含义
+CMD：
+```bat
+cd pc_host
+py -3.11 -m venv .venv
+.venv\Scripts\activate.bat
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe main.py
+```
 
-| LED | 名称 | 含义 | 状态 |
-|-----|------|------|------|
-| LED0 | HB | 系统心跳 | 1 Hz 闪烁 |
-| LED1 | ALM | 闹钟 | 使能常亮 / 响铃快闪 |
-| LED2 | EDIT | 编辑模式 | 编辑态常亮 |
-| LED3 | RX/TX | 串口活动 | 收发后亮 100 ms |
-| LED4 | SUN | 天气晴（扩展） | 常亮 |
-| LED5 | RAI/SNO | 雨雪（扩展） | 慢闪 |
-| LED6 | HOT | 高温 ≥30°C（扩展） | 常亮 |
-| LED7 | NTP | 对时状态（扩展） | 已同步常亮 / 超 24 h 慢闪 / 未同步灭 |
-
-前 4 位为基础必做，后 4 位在完成扩展功能 E1 / E2 时启用。
-
-## 串口协议命令总表
-
-波特率 115200，8N1，无流控，ASCII 编码，行结束符 CR LF 或 LF 兼容，单帧最大 64 字节。
-
-| 命令 | 参数 | 应答 | 说明 |
-|------|------|------|------|
-| *RST | — | OK | 复位时钟 / 日期 / 闹钟 |
-| *PING | — | *PONG \<秒\> | 心跳 |
-| *SET:DATE | YEAR / MONTH / DATE 任意组合 | OK | 设置日期 |
-| *SET:TIME | HOUR / MINute / SECond 任意组合 | OK | 设置时间 |
-| *SET:ALARM | HOUR / MINute / SECond / OFF | OK | 设置闹钟或关闭 |
-| *SET:DISP | ON / OFF | OK | 数码管亮灭 |
-| *SET:FORMAT | LEFT / RIGHT | OK | 显示方向 |
-| *SET:MSG | ≤32 字节文本 保留大小写 | OK | 滚动消息 |
-| *SET:BEEP | 10–5000 ms | OK | 远程蜂鸣 |
-| *SET:LED | 2 位十六进制 | OK | 远程直控 LED |
-| *SET:KEY | 按键名 共 10 种 | OK | 模拟按键 不回 EVT KEY |
-| *SET:MODE | DAY / NIGHT | OK | 昼夜模式 扩展 |
-| *GET | DATE / TIME / ALARM / DISPlay / FORMAT | OK \<数据\> | 查询状态 |
-
-- 容错规则：大小写不敏感、空格 / Tab 容错、大写字母必输小写可省略。
-- 错误回应：ERROR SYNTAX / PARAM / RANGE / LEN / BUSY。
-- FORMAT RIGHT 下所有 GET 应答和 EVT DISP 上报均逆序传输。
+程序启动后选择 S800 对应的 COM 端口并点击“打开”。连接成功后可使用控制面板、数字孪生镜像、日志、网络对时、天气和数据看板。

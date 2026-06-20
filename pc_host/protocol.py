@@ -7,9 +7,10 @@ def with_crlf(line: str) -> str:
 
 def is_heartbeat(line: str) -> bool:
     # 心跳仅含 C1 的 PING 与 PONG 1Hz 保活 以及 C3 的 DISP 与 LED 事件 1Hz 显示心跳
-    # 倒计时状态属业务数据 文档未列为心跳 不过滤
+    # 倒计时 RUN 状态每秒上报，仅隐藏该高频状态；其余状态变化仍显示
     return (line.startswith("*PING") or line.startswith("*PONG")
-            or line.startswith("*EVT:DISP") or line.startswith("*EVT:LED"))
+            or line.startswith("*EVT:DISP") or line.startswith("*EVT:LED")
+            or line.startswith("*EVT:CD STATE RUN "))
 
 
 def parse_disp_event(line: str):
