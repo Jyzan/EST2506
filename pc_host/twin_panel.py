@@ -10,15 +10,21 @@ class HoldButton(QPushButton):
     """区分短按与长按 按住到达阈值即触发长按 无需松手 与板子行为一致"""
     hold_triggered = pyqtSignal()
     short_clicked = pyqtSignal()
+    repeat_clicked = pyqtSignal()
 
     HOLD_MS = 800
+    REPEAT_MS = 200
 
-    def __init__(self, text, parent=None):
+    def __init__(self, text, parent=None, repeat_enabled=False):
         super().__init__(text, parent)
+        self._repeat_enabled = repeat_enabled
         self._long_fired = False
         self._hold_timer = QTimer(self)
         self._hold_timer.setSingleShot(True)
         self._hold_timer.timeout.connect(self._on_hold_timeout)
+        self._repeat_timer = QTimer(self)
+        self._repeat_timer.setInterval(self.REPEAT_MS)
+        self._repeat_timer.timeout.connect(self.repeat_clicked.emit)
 
     def _set_pulse(self, on):
         self.setProperty("pulse", on)
@@ -33,14 +39,20 @@ class HoldButton(QPushButton):
     def mousePressEvent(self, event):
         self._long_fired = False
         self._set_pulse(True)
-        self._hold_timer.start(self.HOLD_MS)
+        if self._repeat_enabled:
+            # ADD 和 SAVE 与物理键一致 按下立即执行并每 200ms 连发
+            self.short_clicked.emit()
+            self._repeat_timer.start()
+        else:
+            self._hold_timer.start(self.HOLD_MS)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         self._hold_timer.stop()
+        self._repeat_timer.stop()
         self._set_pulse(False)
         super().mouseReleaseEvent(event)
-        if not self._long_fired:
+        if not self._repeat_enabled and not self._long_fired:
             self.short_clicked.emit()
 
 
@@ -157,6 +169,7 @@ class TwinPanel(QWidget):
     """数字孪生镜像面板顶层容器 组合 8 位数码管 8 位 LED 8 个 I2C 按键 加 2 个 GPIO 按键 提供统一的 update_digits update_leds pulse_key 接口"""
     key_clicked = pyqtSignal(str)
     key_long = pyqtSignal(str)
+    key_repeat = pyqtSignal(str)
 
     LED_HINTS = ["HB", "ALM", "EDIT", "RX/TX", "SUN", "RAI/SNO", "HOT", "NTP"]
     KEY_LAYOUT = [
@@ -196,13 +209,14 @@ class TwinPanel(QWidget):
         key_grid.setHorizontalSpacing(6)
         key_grid.setVerticalSpacing(6)
         for idx, (label, name) in enumerate(self.KEY_LAYOUT):
-            btn = HoldButton(label)
+            btn = HoldButton(label, repeat_enabled=name in ("ADD", "SAVE"))
             btn.setMinimumHeight(26)
             btn.setMinimumWidth(0)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setProperty("pulse", False)
             btn.short_clicked.connect(lambda n=name: self.key_clicked.emit(n))
             btn.hold_triggered.connect(lambda n=name: self.key_long.emit(n))
+            btn.repeat_clicked.connect(lambda n=name: self.key_repeat.emit(n))
             self.buttons[name] = btn
             key_grid.addWidget(btn, idx // 4, idx % 4)
         layout.addLayout(key_grid)

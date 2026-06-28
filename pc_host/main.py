@@ -30,6 +30,7 @@ from weather_helper import fetch_shanghai_weather
 
 
 DEFAULT_PORT = "COM9"
+WEATHER_RETRY_MS = 60 * 1000
 KEY_NAMES = ["FUNC", "SHIFT", "ADD", "SAVE", "DISP", "SPEED", "FORMAT", "EXT", "USER1", "USER2"]
 
 
@@ -185,6 +186,8 @@ class MainWindow(QMainWindow):
         self._pending_commands = deque()
         self._ntp_sync_ctx = None
         self._last_weather = None
+        self._weather_retry_count = 0
+        self._alarm_ringing = False
         self.store = EventStore(str(Path(__file__).resolve().parent / "events.csv"))
         self.log_lines = 0
         self.tts = TtsSpeaker()
@@ -207,6 +210,10 @@ class MainWindow(QMainWindow):
         self.weather_timer = QTimer(self)
         self.weather_timer.timeout.connect(self.fetch_weather)
         self.weather_timer.start(30 * 60 * 1000)
+
+        self.weather_retry_timer = QTimer(self)
+        self.weather_retry_timer.setSingleShot(True)
+        self.weather_retry_timer.timeout.connect(self.fetch_weather)
 
         self.daynight_timer = QTimer(self)
         self.daynight_timer.timeout.connect(self.auto_daynight)
@@ -238,6 +245,7 @@ class MainWindow(QMainWindow):
         self.twin = TwinPanel()
         self.twin.key_clicked.connect(self.on_virtual_key)
         self.twin.key_long.connect(self.on_virtual_long_key)
+        self.twin.key_repeat.connect(self.on_virtual_repeat_key)
         mirror_layout.addWidget(self.twin)
         splitter.addWidget(mirror_box)
         splitter.addWidget(self.build_control_panel())
@@ -738,12 +746,15 @@ class MainWindow(QMainWindow):
             if self._last_weather is not None:
                 temp, cond = self._last_weather
                 self.send_command(f"*SET:WEA {temp} {cond}")
+            # 先补发缓存恢复板上天气状态 再拉取最新天气 成功后会再次下发
+            self.fetch_weather()
             # 自动昼夜以 MCU 当前显示时间为准，串口一打开就立即读取并应用。
             self.auto_daynight()
         else:
             self.heartbeat_timer.stop()
             self._cd_ring_timer.stop()
             self.twin.clear_key_states()
+            self._alarm_ringing = False
             self._pending_daynight = False
             self._manual_ping_pending = False
             self._pending_commands.clear()
@@ -817,6 +828,13 @@ class MainWindow(QMainWindow):
         norm = line.upper().replace(" ", "").replace("\t", "")
         if norm.startswith("*GET"):
             return
+        if norm.startswith("*RST"):
+            self.send_command("*GET:FORMAT")
+            self.send_command("*GET:MODE")
+            self.send_command("*GET:DISPLAY")
+            self.send_command("*GET:ALARM")
+            self.send_command("*GET:COUNTDOWN")
+            return
         if norm.startswith("*SET:FORMAT"):
             self.send_command("*GET:FORMAT")
         elif norm.startswith("*SET:DISP"):
@@ -842,13 +860,10 @@ class MainWindow(QMainWindow):
             self.send_command("*GET:FORMAT")
 
     def on_virtual_long_key(self, name: str):
-        """镜像面板虚拟按键长按响应 FUNC 长按即 SAVE ADD 长按模拟三次连击"""
+        """镜像面板虚拟按键长按响应 FUNC 保存 USER1 查询 EXT 停止"""
         if name == "FUNC":
-            self.send_command("*SET:KEY SAVE")
-        elif name == "ADD":
-            self.send_command("*SET:KEY ADD")
-            QTimer.singleShot(200, lambda: self.send_command("*SET:KEY ADD"))
-            QTimer.singleShot(400, lambda: self.send_command("*SET:KEY ADD"))
+            # 物理 FUNC 在响铃期间按下即止铃 其余编辑状态长按等效 SAVE
+            self.send_command("*SET:KEY FUNC" if self._alarm_ringing else "*SET:KEY SAVE")
         elif name == "USER1":
             # 长按 USER1 即板上 NTP 状态短显 参考 FAQ Q13 通过 SET KEY USER1 触发
             self.send_command("*SET:KEY USER1")
@@ -860,6 +875,10 @@ class MainWindow(QMainWindow):
             self.send_command("*SET:COUNTDOWN STOP")
         else:
             self.on_virtual_key(name)
+
+    def on_virtual_repeat_key(self, name: str):
+        """ADD 和 SAVE 按住期间每 200ms 下发一次 不重复计入按键热度"""
+        self.send_command(f"*SET:KEY {name}")
 
     def on_received(self, line: str):
         """收到串口行 分类记录日志并送入协议解析 异常不崩溃"""
@@ -915,18 +934,32 @@ class MainWindow(QMainWindow):
                 self.send_command("*GET:FORMAT")
             return
         if line.startswith("*EVT:EDIT"):
-            self.store.append("EDIT", line[len("*EVT:EDIT "):].strip())
-            self.refresh_chart()
+            # 按 §28 要求持久化 EDIT 事件到 events.csv
+            body = line[len("*EVT:EDIT "):].strip()
+            if body:
+                self.store.append("EDIT", body)
+                self.refresh_chart()
+            if line.startswith("*EVT:EDIT ALARM "):
+                self.send_command("*GET:ALARM")
+            if line.startswith("*EVT:EDIT TIME ") and self.auto_mode_check.isChecked():
+                value = body  # body 已去掉 *EVT:EDIT 前缀
+                parts = value.split(".")
+                if len(parts) == 3 and all(len(part) == 2 and part.isdigit() for part in parts):
+                    self._daynight_force = False
+                    self._pending_daynight = False
+                    self._do_apply_daynight(int(parts[0]), int(parts[1]))
             return
         if line.startswith("*EVT:ALARM"):
             # 仅在真正响铃时记一条 ALARM 事件 data 写触发时刻 时分秒 符合 C8 规范
             # 关闭报告不是一次触发事件 不写入 events csv
             if line.strip() == "*EVT:ALARM":
+                self._alarm_ringing = True
                 self.state.alarm = "ON"
                 self.store.append("ALARM", dt.datetime.now().strftime("%H.%M.%S"))
                 self.refresh_chart()
                 QMessageBox.information(self, "闹钟", "S800 闹钟正在响铃。")
             else:
+                self._alarm_ringing = False
                 # 停止响铃不等于关闭闹钟 重新查询使能状态后更新状态栏
                 self.send_command("*GET:ALARM")
             return
@@ -981,10 +1014,6 @@ class MainWindow(QMainWindow):
             self.send_command("*NTP SYNC")
         else:
             self.store.append("SYNC", f"delta {ctx['delta_ms']}")
-            self.add_log(
-                "SYS",
-                f"NTP sync {ctx['server']} delta {ctx['delta_ms']} ms",
-            )
             self._ntp_sync_ctx = None
             self.refresh_chart()
 
@@ -1053,7 +1082,7 @@ class MainWindow(QMainWindow):
         if body == "DONE":
             self._cd_ring_timer.stop()
             self.cd_state = "DONE"
-            # 倒计时完成不写 events csv 文档 C8 仅定义 ALARM SYNC EDIT KEY 四类
+            # 倒计时完成不写 events.csv 三张统计图仅使用 ALARM SYNC KEY
             self.countdown_ring.update_state("DONE", 0, self.countdown_ring.total, self.cd_scene)
             if self.cd_voice_check.isChecked():
                 if self.cd_scene == 0:
@@ -1160,7 +1189,6 @@ class MainWindow(QMainWindow):
     def ntp_sync(self):
         """启动后台 NTP 对时线程 防止重复启动"""
         if self._ntp_sync_ctx is not None:
-            self.add_log("SYS", "NTP 对时正在等待 MCU 确认")
             return
         if self.net_worker and self.net_worker.isRunning():
             return
@@ -1170,8 +1198,10 @@ class MainWindow(QMainWindow):
         self.net_worker.start()
 
     def fetch_weather(self):
-        """启动后台天气获取线程 防止重复启动"""
+        """启动后台天气获取线程 网络忙时短暂延后 防止本次刷新丢失"""
         if self.net_worker and self.net_worker.isRunning():
+            if not self.weather_retry_timer.isActive():
+                self.weather_retry_timer.start(5000)
             return
         self.net_worker = NetworkWorker("weather")
         self.net_worker.done.connect(self.on_network_done)
@@ -1194,6 +1224,8 @@ class MainWindow(QMainWindow):
             self.send_command(f"*SET:DATE YEAR MONTH DATE {now.year:04d} {now.month:02d} {now.day:02d}")
         elif kind == "weather":
             temp, cond, desc = data
+            self._weather_retry_count = 0
+            self.weather_retry_timer.stop()
             self._last_weather = (temp, cond)
             self.weather_icon.setText(self.WEATHER_ICONS.get(cond, "?"))
             self.weather_temp.setText(f"{temp}°C")
@@ -1201,13 +1233,21 @@ class MainWindow(QMainWindow):
             self.weather_updated.setText(f"更新时间: {dt.datetime.now():%H:%M:%S}")
             if self.state.connected:
                 self.send_command(f"*SET:WEA {temp} {cond}")
-            # 天气只更新卡片与收发日志 不写 events csv 文档 C8 仅定义 ALARM SYNC EDIT KEY 四类
-            self.add_log("SYS", f"weather {temp}C {cond}")
+            # 天气只更新卡片并按连接状态下发 不写 events.csv 或系统日志
         self.refresh_chart()
 
     def on_network_failed(self, kind, message):
         """网络请求失败处理 日志记录并弹窗"""
         label = "NTP 对时" if kind == "ntp" else "天气获取"
+        if kind == "weather":
+            self._weather_retry_count += 1
+            self.add_log(
+                "ERR",
+                f"{label}请求失败: {message}，60 秒后自动重试",
+                popup=self._weather_retry_count == 1,
+            )
+            self.weather_retry_timer.start(WEATHER_RETRY_MS)
+            return
         self.add_log("ERR", f"{label}请求失败: {message}", popup=True)
 
     def force_mode(self, mode: str):

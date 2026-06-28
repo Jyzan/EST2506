@@ -336,13 +336,12 @@ static uint8_t Tick_TimedOut(uint32_t start, uint32_t span_ms)
     return (uint8_t)((g_tick_ms - start) >= span_ms);
 }
 
-/* 硬件定时器驱动显示扫描 每 1ms 触发一次 与主循环完全解耦 
-   所有 I2C 总线操作集中在此中断内完成 包括数码管刷新 / LED 状态写入 / 按键采样 
-   主循环不直接操作 I2C0 总线 避免与扫描竞争 */
+/* 硬件定时器驱动显示扫描与常规按键采样 每 1ms 触发一次 与主循环完全解耦
+   EXT 独立防抖采样由主循环 flag_5ms 驱动 其余按键仍在 ISR 中采样
+   主循环仅在 flag_5ms 路径中临时关中断后访问 I2C0 总线 */
 void TIMER0A_Handler(void)
 {
     static uint8_t key_div = 0;
-    static uint8_t ext_div = 0;
 
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
 
@@ -353,43 +352,19 @@ void TIMER0A_Handler(void)
         I2C0_WriteByte(PCA9557_I2CADDR, PCA9557_OUTPUT, (uint8_t)~g_led_byte);
     }
 
+    // SW1-7 每 20ms 采样一次 软件去抖由 Key_Scan 完成
     key_div++;
-    ext_div++;
-    if (ext_div >= EXT_SCAN_TICKS) {
-        uint8_t tca1, tca2;
-        ext_div = 0;
-
-        // 每 5ms 双读一次；EXT 累计 4 个一致样本满足 20ms 防抖。
-        // SW1-7 仍只在原来的每 20ms 节点采纳一次，不改变原有识别逻辑。
-        tca1 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
-        tca2 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
-        if (tca1 == tca2) {
-            bool ext_pressed = (tca1 & (1U << (KEY_EXT - 1))) == 0U;
-
-            if (ext_pressed == g_ext_sample_candidate) {
-                if (g_ext_sample_count < EXT_DEBOUNCE_SAMPLES) {
-                    g_ext_sample_count++;
-                }
-            } else {
-                g_ext_sample_candidate = ext_pressed;
-                g_ext_sample_count = 1U;
+    if (key_div >= KEY_SCAN_TICKS) {
+        uint8_t tca;
+        key_div = 0;
+        tca = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+        {
+            uint8_t raw = 0;
+            uint8_t i;
+            for (i = 0; i < 7; i++) {
+                if ((tca & (1U << i)) == 0U) raw |= (1U << i);
             }
-            if (g_ext_sample_count >= EXT_DEBOUNCE_SAMPLES) {
-                g_ext_debounced_pressed = g_ext_sample_candidate;
-            }
-
-            if (key_div >= KEY_SCAN_TICKS) {
-                uint8_t raw = 0;
-                uint8_t i;
-                for (i = 0; i < 7; i++) {
-                    if ((tca1 & (1U << i)) == 0U) raw |= (1U << i);
-                }
-                g_tca_key_raw = raw;
-            }
-        }
-        // 双读不一致时保留上一轮状态，不把 I2C 毛刺当作按键变化。
-        if (key_div >= KEY_SCAN_TICKS) {
-            key_div = 0;
+            g_tca_key_raw = raw;
         }
     }
 }
@@ -529,6 +504,33 @@ int main(void)
     Startup_Init();
 
     while (1) {
+        // flag_5ms: EXT 独立防抖 双读 I2C 连续 4 次一致 (20ms) 确认状态
+        if (flag_5ms) {
+            uint8_t tca1, tca2;
+            flag_5ms = 0;
+            IntDisable(INT_TIMER0A);
+            tca1 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+            tca2 = I2C0_ReadByte(TCA6424_I2CADDR, TCA6424_INPUT_PORT0);
+            IntEnable(INT_TIMER0A);
+            if (tca1 == tca2) {
+                bool ext_pressed = (tca1 & (1U << (KEY_EXT - 1))) == 0U;
+                if (ext_pressed == g_ext_sample_candidate) {
+                    if (g_ext_sample_count < EXT_DEBOUNCE_SAMPLES)
+                        g_ext_sample_count++;
+                } else {
+                    g_ext_sample_candidate = ext_pressed;
+                    g_ext_sample_count = 1U;
+                }
+                if (g_ext_sample_count >= EXT_DEBOUNCE_SAMPLES) {
+                    g_ext_debounced_pressed = g_ext_sample_candidate;
+                }
+            }
+        }
+
+        if (flag_100ms) {
+            flag_100ms = 0;
+        }
+
         if (flag_10ms) {
             key_code_t k;
             key_event_t e;
@@ -1585,6 +1587,7 @@ static void Handle_Key(key_code_t key)
 
     // 响铃中 FUNC 无条件止铃 优先级最高; 若在倒计时 DONE 中也结束倒计时
     if (g_alarm.ringing && key == KEY_FUNC) {
+        g_alarm.enabled = 0;
         g_alarm.ringing = 0;
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
         UART_PutString("*EVT:ALARM_OFF\r\n");
@@ -1767,9 +1770,9 @@ static void Time_Tick_1s(void)
             if (g_cd_scene == 1) {
                 // 情景 1 音乐庆祝 启动旋律替代蜂鸣器节奏响铃
                 Music_Start();
-            } else if (g_cd_scene != 2 && g_mode != MODE_NIGHT) {
-                g_alarm.ringing = 1; g_alarm_ring_start_ms = g_tick_ms;
-                g_alarm_last_beep_ms = 0; g_ring_limit_ms = 10000U;
+            } else if (g_cd_scene == 0) {
+                // 文本提醒使用独立节奏蜂鸣 不占用闹钟状态和 LED1
+                g_alarm_beep_on = 0; g_alarm_last_beep_ms = 0;
             }
             UART_PutString("*EVT:CD DONE\r\n");
         } else {
@@ -2040,17 +2043,16 @@ static void Music_Service(void)
     }
 }
 
-// 停止/取消倒计时 回到 IDLE 同时止住可能的到点响铃和音乐 LED/显示随之恢复
+// 停止或取消倒计时 回到 IDLE 同时停止文本节奏提示和音乐
 static void Countdown_Stop(void)
 {
-    bool was_done = (g_cd_state == CD_DONE);
     g_cd_state = CD_IDLE;
     g_cd_remain_s = 0;
     Music_Stop();  // 情景 1 音乐播放同步终止
-    if (was_done && g_alarm.ringing) {
-        g_alarm.ringing = 0;
+    // 文本提醒只停止自身蜂鸣 不改变真实闹钟状态
+    if (!g_alarm.ringing) g_alarm_beep_on = 0;
+    if (!g_alarm.ringing && !g_remote_beep_active) {
         GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5, 0);
-        UART_PutString("*EVT:ALARM_OFF\r\n");
     }
     Scroll_Reset();
     Send_CD_Event();
@@ -2112,8 +2114,8 @@ static bool Countdown_HandleKey(key_code_t key)
     }
 }
 
-// *SET:COUNTDOWN 子命令解析 返回 true 表示已处理(含错误应答)
-// 支持 TIME/SCENE/MSG/START/PAUSE/RESUME/STOP 及向后兼容的纯秒数形式
+// 倒计时命令子命令解析 返回 true 表示已处理
+// 支持 TIME SCENE MSG START PAUSE RESUME STOP
 static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
 {
     uint16_t v16;
@@ -2122,7 +2124,10 @@ static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
     if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
 
     if (Token_Matches(argv[1], "TIME")) {
-        if (argc < 3 || !Parse_U16(argv[2], &v16) || v16 == 0U || v16 > 3599U) {
+        if (argc != 3U) {
+            UART_PutString("ERROR SYNTAX\r\n"); return true;
+        }
+        if (!Parse_U16(argv[2], &v16) || v16 == 0U || v16 > 3599U) {
             UART_PutString("ERROR RANGE\r\n"); return true;
         }
         g_cd_total_s = v16;
@@ -2132,7 +2137,10 @@ static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
         return true;
     }
     if (Token_Matches(argv[1], "SCENE")) {
-        if (argc < 3 || !Parse_U8(argv[2], &v8) || v8 > 2U) {
+        if (argc != 3U) {
+            UART_PutString("ERROR SYNTAX\r\n"); return true;
+        }
+        if (!Parse_U8(argv[2], &v8) || v8 > 2U) {
             UART_PutString("ERROR RANGE\r\n"); return true;
         }
         g_cd_scene = v8;
@@ -2150,6 +2158,7 @@ static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
         }
         if (!*raw) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         while (raw[len] && raw[len] != '\r' && raw[len] != '\n' && len < 32U) len++;
+        if (len == 0U) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         if (raw[len] && raw[len] != '\r' && raw[len] != '\n') {
             UART_PutString("ERROR RANGE\r\n"); return true;
         }
@@ -2160,24 +2169,22 @@ static bool Countdown_HandleCommand(char *line, char **argv, uint8_t argc)
         return true;
     }
     if (Token_Matches(argv[1], "START")) {
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         Countdown_Start(); UART_PutString("OK\r\n"); return true;
     }
     if (Token_Matches(argv[1], "PAUSE")) {
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         if (g_cd_state == CD_RUN) { g_cd_state = CD_PAUSE; Send_CD_Event(); }
         UART_PutString("OK\r\n"); return true;
     }
     if (Token_Matches(argv[1], "RESUME")) {
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         if (g_cd_state == CD_PAUSE) { g_cd_state = CD_RUN; Send_CD_Event(); }
         UART_PutString("OK\r\n"); return true;
     }
     if (Token_Matches(argv[1], "STOP")) {
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return true; }
         Countdown_Stop(); UART_PutString("OK\r\n"); return true;
-    }
-    // 向后兼容 *SET:COUNTDOWN <sec> 设时长并立即启动
-    if (Parse_U16(argv[1], &v16)) {
-        if (v16 == 0U || v16 > 3599U) { UART_PutString("ERROR RANGE\r\n"); return true; }
-        g_cd_min = (uint8_t)(v16 / 60U); g_cd_sec = (uint8_t)(v16 % 60U);
-        Countdown_Start(); UART_PutString("OK\r\n"); return true;
     }
 
     UART_PutString("ERROR PARAM\r\n");
@@ -2198,7 +2205,15 @@ static void Alarm_Service(void)
         }
     }
 
-    if (!g_alarm.ringing) return;
+    if (!g_alarm.ringing) {
+        // 情景 0 独立节奏提示 不置位闹钟状态 因而不会影响 LED1
+        if (!g_remote_beep_active && g_cd_state == CD_DONE && g_cd_scene == 0U) {
+            GPIOPinWrite(GPIO_PORTK_BASE, GPIO_PIN_5,
+                         (g_mode != MODE_NIGHT && ((g_tick_ms / 200U) & 1U))
+                         ? GPIO_PIN_5 : 0);
+        }
+        return;
+    }
     // 超时自动止铃
     if (Tick_TimedOut(g_alarm_ring_start_ms, g_ring_limit_ms)) {
         g_alarm.ringing = 0;
@@ -2363,19 +2378,19 @@ static bool Token_Matches(const char *token, const char *pattern)
     uint8_t req = 0, i;
     Upper_Copy(t, token, sizeof(t));
     Upper_Copy(p, pattern, sizeof(p));
-    // 统计 pattern 中大写字母数量 即最少必输字符数
-    for (i = 0; pattern[i]; i++) if (isupper((unsigned char)pattern[i])) req++;
+    // 小写字母可以省略 其余字符必须输入
+    for (i = 0; pattern[i]; i++) {
+        if (!islower((unsigned char)pattern[i])) req++;
+    }
     // token 长度必须 >= 必输字符数 <= 完整 pattern 长度
     if (strlen(t) < req || strlen(t) > strlen(p)) return false;
     return strncmp(p, t, strlen(t)) == 0;
 }
 
-// 命令头匹配 与 Token_Matches 一致 同时兼容首字符 '*' 可缺省
+// 命令头匹配 要求星号前缀完整
 static bool Command_Matches(const char *token, const char *pattern)
 {
-    if (Token_Matches(token, pattern)) return true;
-    if (pattern[0] == '*' && Token_Matches(token, pattern + 1)) return true;
-    return false;
+    return Token_Matches(token, pattern);
 }
 
 // 无符号 8 位整数解析 失败或越界返回 false
@@ -2422,12 +2437,13 @@ static void Process_Command(char *line)
     uint8_t argc = 0;
     char *tok;
     uint8_t i;
-    char *sync;
 
-    // 若 UART 边界抖动导致行首混入残留字节, 从第一个 '*' 重新同步 
-    // 若首字节 '*' 偶发丢失, 后续 Command_Matches 会接受无 '*' 命令头 
-    sync = strchr(line, '*');
-    if (sync) line = sync;
+    // 跳过行首空白后必须以星号开始
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line != '*') {
+        UART_PutString("ERROR SYNTAX\r\n");
+        return;
+    }
 
     // 统一转为大写后按空格/Tab 分割为 token 数组
     Upper_Copy(work, line, sizeof(work));
@@ -2440,12 +2456,14 @@ static void Process_Command(char *line)
 
     // ---- *PING 心跳应答 ----
     if (Command_Matches(argv[0], "*PING")) {
+        if (argc != 1U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         UART_Printf("*PONG %lu\r\n", (unsigned long)(g_tick_ms / 1000U));
         return;
     }
 
     // ---- *RST 复位 恢复出厂默认值 ----
     if (Command_Matches(argv[0], "*RST")) {
+        if (argc != 1U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         g_date.y = 2026; g_date.m = 6; g_date.d = 1;
         g_time.h = 0; g_time.mi = 0; g_time.s = 0;
         Calc_Wday(&g_date);
@@ -2469,7 +2487,7 @@ static void Process_Command(char *line)
 
     // ---- *NTP SYNC 标记对时完成 ----
     if (Command_Matches(argv[0], "*NTP")) {
-        if (argc < 2 || !Token_Matches(argv[1], "SYNC")) {
+        if (argc != 2U || !Token_Matches(argv[1], "SYNC")) {
             UART_PutString("ERROR SYNTAX\r\n");
             return;
         }
@@ -2483,20 +2501,16 @@ static void Process_Command(char *line)
         return;
     }
 
-    // 同时支持空格形式和冒号形式的 GET 命令 "*GET DATE" 和 "*GET:DATE"
-    // 逐字符比较 argv[0][0..4] 与 "*GET:" 避免 strncmp 在 ARMCC 上的内存段问题
+    // GET 支持冒号后直接跟子命令或以空白分隔子命令
     if (Command_Matches(argv[0], "*GET") ||
-        (argv[0][0]=='*' && argv[0][1]=='G' && argv[0][2]=='E' && argv[0][3]=='T' && argv[0][4]==':') ||
-        (argv[0][0]=='G' && argv[0][1]=='E' && argv[0][2]=='T' && argv[0][3]==':')) {
+        (argv[0][0]=='*' && argv[0][1]=='G' && argv[0][2]=='E' && argv[0][3]=='T' && argv[0][4]==':')) {
         char value[24];
         const char *sub;
         if (argv[0][0]=='*' && argv[0][1]=='G' && argv[0][2]=='E' && argv[0][3]=='T' && argv[0][4]==':' && argv[0][5] != '\0') {
-            sub = argv[0] + 5;                 // 冒号形式 子命令紧跟在 *GET: 后面
-        } else if (argv[0][0]=='G' && argv[0][1]=='E' && argv[0][2]=='T' && argv[0][3]==':' && argv[0][4] != '\0') {
-            sub = argv[0] + 4;                 // 兼容首字节 '*' 丢失的 GET:xxx
+            if (argc != 1U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+            sub = argv[0] + 5;
         } else {
-            // 空格形式 子命令为下一个 token
-            if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+            if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
             sub = argv[1];
         }
         if (Token_Matches(sub, "DATE"))
@@ -2524,7 +2538,7 @@ static void Process_Command(char *line)
 
     // ---- *SET:KEY 模拟物理按键 不回报 *EVT:KEY 防环回 ----
     if (Command_Matches(argv[0], "*SET:KEY")) {
-        if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         for (i = 1; i <= KEY_COUNT; i++) {
             if (Token_Matches(argv[1], KEY_NAMES[i])) {
                 Handle_Key((key_code_t)i);   // *SET:KEY 直接执行动作不回报 *EVT:KEY 防环回
@@ -2538,7 +2552,7 @@ static void Process_Command(char *line)
 
     // ---- *SET:DISPLAY 数码管整屏开关 ----
     if (Command_Matches(argv[0], "*SET:DISPlay")) {
-        if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "ON")) disp_on = 1;
         else if (Token_Matches(argv[1], "OFF")) disp_on = 0;
         else { UART_PutString("ERROR PARAM\r\n"); return; }
@@ -2548,7 +2562,7 @@ static void Process_Command(char *line)
 
     // ---- *SET:FORMAT 显示方向 LEFT/RIGHT ----
     if (Command_Matches(argv[0], "*SET:FORMAT")) {
-        if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "LEFT")) g_format = FMT_LEFT;
         else if (Token_Matches(argv[1], "RIGHT")) g_format = FMT_RIGHT;
         else { UART_PutString("ERROR PARAM\r\n"); return; }
@@ -2558,7 +2572,7 @@ static void Process_Command(char *line)
 
     // ---- *SET:MODE 昼夜模式切换 切换后上报 *EVT:MODE ----
     if (Command_Matches(argv[0], "*SET:MODE")) {
-        if (argc < 2) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+        if (argc != 2U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         if (Token_Matches(argv[1], "DAY")) g_mode = MODE_DAY;
         else if (Token_Matches(argv[1], "NIGHT")) g_mode = MODE_NIGHT;
         else { UART_PutString("ERROR PARAM\r\n"); return; }
@@ -2569,7 +2583,7 @@ static void Process_Command(char *line)
     // ---- *SET:LED 远程直控 LED 00 退出接管 非00 进入接管 ----
     if (Command_Matches(argv[0], "*SET:LED")) {
         unsigned int val;
-        if (argc < 2 || strlen(argv[1]) != 2U ||
+        if (argc != 2U || strlen(argv[1]) != 2U ||
             !isxdigit((unsigned char)argv[1][0]) ||
             !isxdigit((unsigned char)argv[1][1]) ||
             sscanf(argv[1], "%x", &val) != 1 || val > 0xff) {
@@ -2591,7 +2605,10 @@ static void Process_Command(char *line)
     // ---- *SET:BEEP 远程蜂鸣 独立计时 范围 10-5000ms ----
     if (Command_Matches(argv[0], "*SET:BEEP")) {
         uint16_t ms;
-        if (argc < 2 || !Parse_U16(argv[1], &ms) || ms < 10 || ms > 5000) {
+        if (argc != 2U) {
+            UART_PutString("ERROR SYNTAX\r\n"); return;
+        }
+        if (!Parse_U16(argv[1], &ms) || ms < 10 || ms > 5000) {
             UART_PutString("ERROR RANGE\r\n"); return;
         }
         if (g_mode == MODE_NIGHT) {
@@ -2616,10 +2633,13 @@ static void Process_Command(char *line)
     // ---- *SET:MSG 滚动消息 ≤32 字节 保留原大小写 ----
     if (Command_Matches(argv[0], "*SET:MSG")) {
         // 从原始 line 中取消息文本 避免 toupper 破坏大小写
-        const char *raw = strchr(line, ' ');
+        const char *raw = strpbrk(line, " \t");
         uint8_t rlen = 0, len = 0;
         if (!raw) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         while (*raw == ' ' || *raw == '\t') raw++;
+        if (*raw == '\0' || *raw == '\r' || *raw == '\n') {
+            UART_PutString("ERROR SYNTAX\r\n"); return;
+        }
         while (raw[rlen] && raw[rlen] != '\r' && raw[rlen] != '\n' && rlen < 32) rlen++;
         // 消息长度不可超过 32 字节
         if (raw[rlen] && raw[rlen] != '\r' && raw[rlen] != '\n') {
@@ -2657,7 +2677,7 @@ static void Process_Command(char *line)
         char *end;
         uint8_t code;
 
-        if (argc < 3) { UART_PutString("ERROR SYNTAX\r\n"); return; }
+        if (argc != 3U) { UART_PutString("ERROR SYNTAX\r\n"); return; }
         temp = strtol(argv[1], &end, 10);
         if (*end != '\0') { UART_PutString("ERROR PARAM\r\n"); return; }
         if (temp < -40 || temp > 50) { UART_PutString("ERROR RANGE\r\n"); return; }
@@ -2711,20 +2731,30 @@ static void Process_Command(char *line)
             // 解析参数 先扫描字段名 token 直到遇到非字段名 token 即值开始
             uint8_t field_count = 0;
             uint8_t value_start;
+            uint8_t field_mask = 0;
             for (i = 1; i < argc; i++) {
-                if (is_date &&
-                    (Token_Matches(argv[i], "YEAR") ||
-                     Token_Matches(argv[i], "MONTH") ||
-                     Token_Matches(argv[i], "DATE"))) {
-                    field_count++;
-                } else if (!is_date &&
-                           (Token_Matches(argv[i], "HOUR") ||
-                            Token_Matches(argv[i], "MINute") ||
-                            Token_Matches(argv[i], "SECond"))) {
-                    field_count++;
+                uint8_t field_bit = 0;
+                if (is_date && Token_Matches(argv[i], "YEAR")) {
+                    field_bit = 0x01U;
+                } else if (is_date && Token_Matches(argv[i], "MONTH")) {
+                    field_bit = 0x02U;
+                } else if (is_date && Token_Matches(argv[i], "DATE")) {
+                    field_bit = 0x04U;
+                } else if (!is_date && Token_Matches(argv[i], "HOUR")) {
+                    field_bit = 0x01U;
+                } else if (!is_date && Token_Matches(argv[i], "MINute")) {
+                    field_bit = 0x02U;
+                } else if (!is_date && Token_Matches(argv[i], "SECond")) {
+                    field_bit = 0x04U;
                 } else {
-                    break;  // 字段名结束 后面是值
+                    break;
                 }
+                if ((field_mask & field_bit) != 0U) {
+                    UART_PutString("ERROR PARAM\r\n");
+                    return;
+                }
+                field_mask |= field_bit;
+                field_count++;
             }
             // 值应在字段名之后 数量必须匹配 支持任意参数组合
             value_start = (uint8_t)(1U + field_count);
